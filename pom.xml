@@ -1,52 +1,241 @@
 <?xml version="1.0" encoding="UTF-8"?>
+
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
-                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="
+             http://maven.apache.org/POM/4.0.0
+             https://maven.apache.org/xsd/maven-4.0.0.xsd">
 
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.zorzanotes</groupId>
+
     <artifactId>zorza-notes</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+
+    <version>1.0.0</version>
 
     <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.release>25</maven.compiler.release>
-        <javafx.version>25.0.2</javafx.version>
+
+        <project.build.sourceEncoding>
+            UTF-8
+        </project.build.sourceEncoding>
+
+        <maven.compiler.release>
+            25
+        </maven.compiler.release>
+
+        <javafx.version>
+            25.0.2
+        </javafx.version>
+
     </properties>
 
     <dependencies>
+
+        <!-- JavaFX -->
+
         <dependency>
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-controls</artifactId>
             <version>${javafx.version}</version>
         </dependency>
 
+        <!--
+            SQLite with SQLCipher / SQLiteMC support.
+
+            Keep this rather than adding Xerial's
+            sqlite-jdbc alongside it.
+        -->
+
         <dependency>
-            <groupId>org.xerial</groupId>
+            <groupId>io.github.willena</groupId>
             <artifactId>sqlite-jdbc</artifactId>
-            <version>3.50.3.0</version>
+            <version>3.53.4.0</version>
         </dependency>
+
     </dependencies>
 
     <build>
+
+        <finalName>
+            zorza-notes
+        </finalName>
+
         <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.14.1</version>
-            </plugin>
+
+            <!-- Java 25 compiler -->
 
             <plugin>
-                <groupId>org.openjfx</groupId>
-                <artifactId>javafx-maven-plugin</artifactId>
-                <version>0.0.8</version>
-                <configuration>
-                    <mainClass>org.zorzanotes.ZorzaNotes</mainClass>
-                </configuration>
+
+                <groupId>
+                    org.apache.maven.plugins
+                </groupId>
+
+                <artifactId>
+                    maven-compiler-plugin
+                </artifactId>
+
+                <version>
+                    3.14.1
+                </version>
+
             </plugin>
+
+            <!-- IntelliJ / development JavaFX runner -->
+
+            <plugin>
+
+                <groupId>
+                    org.openjfx
+                </groupId>
+
+                <artifactId>
+                    javafx-maven-plugin
+                </artifactId>
+
+                <version>
+                    0.0.8
+                </version>
+
+                <configuration>
+
+                    <mainClass>
+                        org.zorzanotes.ZorzaNotes
+                    </mainClass>
+
+                </configuration>
+
+            </plugin>
+
+            <!--
+                Copy every runtime dependency into target/package
+                so jpackage gets one self-contained input directory.
+            -->
+
+            <plugin>
+
+                <groupId>
+                    org.apache.maven.plugins
+                </groupId>
+
+                <artifactId>
+                    maven-dependency-plugin
+                </artifactId>
+
+                <version>
+                    3.8.1
+                </version>
+
+                <executions>
+
+                    <execution>
+
+                        <id>
+                            copy-runtime-dependencies
+                        </id>
+
+                        <phase>
+                            package
+                        </phase>
+
+                        <goals>
+
+                            <goal>
+                                copy-dependencies
+                            </goal>
+
+                        </goals>
+
+                        <configuration>
+
+                            <includeScope>
+                                runtime
+                            </includeScope>
+
+                            <outputDirectory>
+                                ${project.build.directory}/package
+                            </outputDirectory>
+
+                        </configuration>
+
+                    </execution>
+
+                </executions>
+
+            </plugin>
+
+            <!-- Copy our own JAR into target/package too -->
+
+            <plugin>
+
+                <groupId>
+                    org.apache.maven.plugins
+                </groupId>
+
+                <artifactId>
+                    maven-resources-plugin
+                </artifactId>
+
+                <version>
+                    3.3.1
+                </version>
+
+                <executions>
+
+                    <execution>
+
+                        <id>
+                            copy-application-jar
+                        </id>
+
+                        <phase>
+                            package
+                        </phase>
+
+                        <goals>
+
+                            <goal>
+                                copy-resources
+                            </goal>
+
+                        </goals>
+
+                        <configuration>
+
+                            <outputDirectory>
+                                ${project.build.directory}/package
+                            </outputDirectory>
+
+                            <resources>
+
+                                <resource>
+
+                                    <directory>
+                                        ${project.build.directory}
+                                    </directory>
+
+                                    <includes>
+
+                                        <include>
+                                            zorza-notes.jar
+                                        </include>
+
+                                    </includes>
+
+                                </resource>
+
+                            </resources>
+
+                        </configuration>
+
+                    </execution>
+
+                </executions>
+
+            </plugin>
+
         </plugins>
+
     </build>
 
 </project>

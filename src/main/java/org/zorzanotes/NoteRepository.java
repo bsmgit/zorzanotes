@@ -1,12 +1,20 @@
 package org.zorzanotes;
 
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
 public class NoteRepository {
+
+    // =============================================================
+    // FIND NOTES IN NOTEBOOK
+    // =============================================================
 
     public List<Note> findByNotebook(
             long notebookId) {
@@ -42,12 +50,8 @@ public class NoteRepository {
                 while (results.next()) {
 
                     notes.add(
-                            new Note(
-                                    results.getLong("id"),
-                                    results.getString("uuid"),
-                                    results.getLong("notebook_id"),
-                                    results.getString("title"),
-                                    results.getString("body")
+                            noteFromResultSet(
+                                    results
                             )
                     );
                 }
@@ -65,6 +69,197 @@ public class NoteRepository {
     }
 
     // =============================================================
+    // FIND NOTE BY ID
+    // =============================================================
+
+    public Note findById(long id) {
+
+        String sql = """
+                SELECT id,
+                       uuid,
+                       notebook_id,
+                       title,
+                       body
+                FROM notes
+                WHERE id = ?
+                """;
+
+        try (Connection connection =
+                     Database.connect();
+
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+
+            statement.setLong(
+                    1,
+                    id
+            );
+
+            try (ResultSet results =
+                         statement.executeQuery()) {
+
+                if (results.next()) {
+
+                    return noteFromResultSet(
+                            results
+                    );
+                }
+            }
+
+        } catch (SQLException e) {
+
+            throw new RuntimeException(
+                    "Unable to load note.",
+                    e
+            );
+        }
+
+        return null;
+    }
+
+    // =============================================================
+    // GLOBAL FTS5 SEARCH
+    // =============================================================
+
+    public List<Note> searchAll(
+            String query) {
+
+        List<Note> notes =
+                new ArrayList<>();
+
+        if (query == null ||
+                query.isBlank()) {
+
+            return notes;
+        }
+
+        String ftsQuery =
+                buildFtsQuery(query);
+
+        if (ftsQuery.isBlank()) {
+            return notes;
+        }
+
+        String sql = """
+                SELECT n.id,
+                       n.uuid,
+                       n.notebook_id,
+                       n.title,
+                       n.body
+                FROM notes_fts
+                JOIN notes n
+                    ON n.id = notes_fts.rowid
+                WHERE notes_fts MATCH ?
+                ORDER BY bm25(notes_fts)
+                LIMIT 250
+                """;
+
+        try (Connection connection =
+                     Database.connect();
+
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+
+            statement.setString(
+                    1,
+                    ftsQuery
+            );
+
+            try (ResultSet results =
+                         statement.executeQuery()) {
+
+                while (results.next()) {
+
+                    notes.add(
+                            noteFromResultSet(
+                                    results
+                            )
+                    );
+                }
+            }
+
+        } catch (SQLException e) {
+
+            throw new RuntimeException(
+                    "Unable to search notes.",
+                    e
+            );
+        }
+
+        return notes;
+    }
+
+    // =============================================================
+    // BUILD SAFE FTS QUERY
+    // =============================================================
+
+    private String buildFtsQuery(
+            String query) {
+
+        /*
+         * We intentionally do not send the user's raw text
+         * directly to MATCH.
+         *
+         * FTS5 has its own query language. Characters such as
+         * quotes, *, :, parentheses, AND, OR, etc. can otherwise
+         * alter the query or cause syntax errors.
+         *
+         * Instead, ordinary words become quoted prefix terms.
+         *
+         * Example:
+         *
+         *     sherlock holm
+         *
+         * becomes:
+         *
+         *     "sherlock"* AND "holm"*
+         *
+         * This gives us useful search-as-you-type behavior.
+         */
+
+        String cleaned =
+                query
+                        .trim()
+                        .replaceAll(
+                                "[^\\p{L}\\p{N}_]+",
+                                " "
+                        );
+
+        if (cleaned.isBlank()) {
+            return "";
+        }
+
+        String[] words =
+                cleaned.split("\\s+");
+
+        StringBuilder result =
+                new StringBuilder();
+
+        for (String word : words) {
+
+            if (word.isBlank()) {
+                continue;
+            }
+
+            if (!result.isEmpty()) {
+                result.append(" AND ");
+            }
+
+            String escaped =
+                    word.replace(
+                            "\"",
+                            "\"\""
+                    );
+
+            result.append("\"")
+                    .append(escaped)
+                    .append("\"*");
+        }
+
+        return result.toString();
+    }
+
+    // =============================================================
     // CREATE EMPTY NOTE
     // =============================================================
 
@@ -79,7 +274,7 @@ public class NoteRepository {
     }
 
     // =============================================================
-    // CREATE NOTE WITH CONTENT
+    // CREATE NOTE
     // =============================================================
 
     public Note create(
@@ -190,7 +385,7 @@ public class NoteRepository {
     }
 
     // =============================================================
-    // UPDATE
+    // UPDATE NOTE
     // =============================================================
 
     public void update(
@@ -243,7 +438,7 @@ public class NoteRepository {
     }
 
     // =============================================================
-    // DELETE
+    // DELETE NOTE
     // =============================================================
 
     public void delete(
@@ -274,5 +469,28 @@ public class NoteRepository {
                     e
             );
         }
+    }
+
+    // =============================================================
+    // RESULT SET -> NOTE
+    // =============================================================
+
+    private Note noteFromResultSet(
+            ResultSet results)
+            throws SQLException {
+
+        return new Note(
+                results.getLong("id"),
+                results.getString("uuid"),
+                results.getLong(
+                        "notebook_id"
+                ),
+                results.getString(
+                        "title"
+                ),
+                results.getString(
+                        "body"
+                )
+        );
     }
 }

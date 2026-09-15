@@ -1,0 +1,73 @@
+.root {
+    -fx-base: #f5f5f5;
+    -fx-background-color: #f5f5f5;
+    -fx-control-inner-background: white;
+    -fx-text-fill: #202020;
+}
+
+.label {
+    -fx-text-fill: #202020;
+}
+
+.text-field,
+.text-area {
+    -fx-text-fill: #202020;
+    -fx-prompt-text-fill: #777777;
+    -fx-control-inner-background: white;
+}
+
+.list-view {
+    -fx-control-inner-background: white;
+}
+
+.list-cell {
+    -fx-text-fill: #202020;
+    -fx-background-color: white;
+}
+
+.list-cell:selected {
+    -fx-background-color: #d8e8ff;
+    -fx-text-fill: #101010;
+}
+
+.menu-bar {
+    -fx-background-color: #eeeeee;
+}
+
+.menu-item .label {
+    -fx-text-fill: #202020;
+}
+
+.button {
+    -fx-text-fill: #202020;
+}
+
+.hyperlink {
+    -fx-text-fill: #0066cc;
+}
+
+/*
+ * Accessibility sizing
+ */
+
+.text-normal {
+    -fx-font-size: 13px;
+}
+
+.text-large {
+    -fx-font-size: 16px;
+}
+
+.text-extra-large {
+    -fx-font-size: 20px;
+}
+
+.app-name {
+    -fx-font-size: 20px;
+    -fx-font-weight: bold;
+}
+
+.note-title {
+    -fx-font-size: 24px;
+    -fx-font-weight: bold;
+}

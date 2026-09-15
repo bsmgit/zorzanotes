@@ -1,8 +1,14 @@
+org/zorzanotes/AppSettings.class
+org/zorzanotes/ThemeManager.class
+org/zorzanotes/ZorzaNotes$1.class
 org/zorzanotes/MarkdownEditor.class
 org/zorzanotes/Note.class
 org/zorzanotes/ExportImportService.class
+org/zorzanotes/EncryptionTest.class
 org/zorzanotes/NoteRepository.class
 org/zorzanotes/NotebookRepository.class
 org/zorzanotes/Notebook.class
+org/zorzanotes/AppSettings$TextSize.class
 org/zorzanotes/Database.class
+org/zorzanotes/ThemeManager$1.class
 org/zorzanotes/ZorzaNotes.class

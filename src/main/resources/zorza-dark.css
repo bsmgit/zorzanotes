@@ -1,0 +1,138 @@
+.root {
+    -fx-base: #252525;
+    -fx-background-color: #1e1e1e;
+    -fx-control-inner-background: #292929;
+    -fx-text-fill: #eeeeee;
+}
+
+.label {
+    -fx-text-fill: #eeeeee;
+}
+
+.text-field,
+.text-area {
+    -fx-background-color: #292929;
+    -fx-control-inner-background: #292929;
+    -fx-text-fill: #eeeeee;
+    -fx-prompt-text-fill: #999999;
+    -fx-highlight-fill: #4d78a8;
+    -fx-highlight-text-fill: white;
+}
+
+.text-area .content {
+    -fx-background-color: #292929;
+}
+
+.list-view {
+    -fx-background-color: #292929;
+    -fx-control-inner-background: #292929;
+}
+
+.list-cell {
+    -fx-background-color: #292929;
+    -fx-text-fill: #eeeeee;
+}
+
+.list-cell:filled:hover {
+    -fx-background-color: #363636;
+}
+
+.list-cell:selected {
+    -fx-background-color: #425f80;
+    -fx-text-fill: white;
+}
+
+.split-pane {
+    -fx-background-color: #1e1e1e;
+}
+
+.split-pane-divider {
+    -fx-background-color: #444444;
+}
+
+.menu-bar {
+    -fx-background-color: #242424;
+}
+
+.menu {
+    -fx-text-fill: #eeeeee;
+}
+
+.menu .label {
+    -fx-text-fill: #eeeeee;
+}
+
+.context-menu {
+    -fx-background-color: #292929;
+}
+
+.menu-item {
+    -fx-background-color: #292929;
+}
+
+.menu-item .label {
+    -fx-text-fill: #eeeeee;
+}
+
+.menu-item:focused {
+    -fx-background-color: #425f80;
+}
+
+.button {
+    -fx-background-color: #383838;
+    -fx-text-fill: #eeeeee;
+    -fx-border-color: #555555;
+    -fx-border-radius: 4px;
+    -fx-background-radius: 4px;
+}
+
+.button:hover {
+    -fx-background-color: #484848;
+}
+
+.combo-box {
+    -fx-background-color: #383838;
+}
+
+.combo-box .list-cell {
+    -fx-background-color: #383838;
+    -fx-text-fill: #eeeeee;
+}
+
+.separator .line {
+    -fx-border-color: #555555;
+}
+
+.hyperlink {
+    -fx-text-fill: #78aee8;
+}
+
+.scroll-bar {
+    -fx-background-color: #242424;
+}
+
+/*
+ * Accessibility sizing
+ */
+
+.text-normal {
+    -fx-font-size: 13px;
+}
+
+.text-large {
+    -fx-font-size: 16px;
+}
+
+.text-extra-large {
+    -fx-font-size: 20px;
+}
+
+.app-name {
+    -fx-font-size: 20px;
+    -fx-font-weight: bold;
+}
+
+.note-title {
+    -fx-font-size: 24px;
+    -fx-font-weight: bold;
+}
