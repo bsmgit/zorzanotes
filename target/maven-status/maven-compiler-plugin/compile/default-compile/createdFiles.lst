@@ -1,0 +1,6 @@
+org/zorzanotes/Notebook.class
+org/zorzanotes/Note.class
+org/zorzanotes/Database.class
+org/zorzanotes/NoteRepository.class
+org/zorzanotes/ZorzaNotes.class
+org/zorzanotes/NotebookRepository.class
