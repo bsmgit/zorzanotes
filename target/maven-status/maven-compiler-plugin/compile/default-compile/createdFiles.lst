@@ -1,6 +1,8 @@
-org/zorzanotes/Notebook.class
+org/zorzanotes/MarkdownEditor.class
 org/zorzanotes/Note.class
-org/zorzanotes/Database.class
+org/zorzanotes/ExportImportService.class
 org/zorzanotes/NoteRepository.class
-org/zorzanotes/ZorzaNotes.class
 org/zorzanotes/NotebookRepository.class
+org/zorzanotes/Notebook.class
+org/zorzanotes/Database.class
+org/zorzanotes/ZorzaNotes.class
