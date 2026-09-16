@@ -19,7 +19,10 @@ import javafx.util.Duration;
 
 import java.io.File;
 import java.io.IOException;
+import java.sql.SQLException;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 public class ZorzaNotes extends Application {
 
@@ -66,7 +69,20 @@ public class ZorzaNotes extends Application {
     @Override
     public void start(Stage stage) {
 
-        Database.initialize();
+        if (!unlockVault(stage)) {
+            VaultService.clearPassword();
+            Platform.exit();
+            return;
+        }
+
+        try {
+            Database.initialize();
+        } catch (SQLException exception) {
+            VaultService.clearPassword();
+            showError(stage, "Unable to Open Zorza Vault", exception);
+            Platform.exit();
+            return;
+        }
 
         // =========================================================
         // NOTEBOOKS
@@ -1163,6 +1179,7 @@ public class ZorzaNotes extends Application {
                     editor
             );
 
+            VaultService.clearPassword();
             Platform.exit();
         });
 
@@ -1345,15 +1362,220 @@ public class ZorzaNotes extends Application {
                 scene
         );
 
-        stage.setOnCloseRequest(event ->
+        stage.setOnCloseRequest(event -> {
 
-                saveImmediately(
-                        noteTitle,
-                        editor
-                )
-        );
+            saveImmediately(
+                    noteTitle,
+                    editor
+            );
+
+            VaultService.clearPassword();
+        });
 
         stage.show();
+    }
+
+    // =============================================================
+    // VAULT STARTUP
+    // =============================================================
+
+    private boolean unlockVault(Stage owner) {
+        if (Database.databaseIsPlaintext()) {
+            return createVaultPassword(owner, true);
+        }
+
+        if (!Database.databaseExists()) {
+            return createVaultPassword(owner, false);
+        }
+
+        return requestVaultPassword(owner);
+    }
+
+    private boolean createVaultPassword(Stage owner, boolean migration) {
+        while (true) {
+            Dialog<char[]> dialog = new Dialog<>();
+            dialog.setTitle("Create Zorza Vault");
+            dialog.setHeaderText(
+                    migration
+                            ? "Protect your existing notes with encryption"
+                            : "Create your encrypted Zorza vault"
+            );
+
+            ButtonType createButton = new ButtonType(
+                    "Create Vault",
+                    ButtonBar.ButtonData.OK_DONE
+            );
+
+            dialog.getDialogPane().getButtonTypes().addAll(
+                    createButton,
+                    ButtonType.CANCEL
+            );
+
+            PasswordField password = new PasswordField();
+            password.setPromptText("Vault password");
+
+            PasswordField confirm = new PasswordField();
+            confirm.setPromptText("Confirm password");
+
+            Label explanation = new Label(
+                    migration
+                            ? "Your existing notes will be copied into a new encrypted database. " +
+                            "A plaintext safety backup will be retained until you delete it manually."
+                            : "Your notes will be encrypted at rest. " +
+                            "You will need this password whenever you open Zorza Notes."
+            );
+            explanation.setWrapText(true);
+
+            Label warning = new Label(
+                    "Important: Zorza does not store your password. " +
+                            "If you forget it, Zorza cannot recover your encrypted notes."
+            );
+            warning.setWrapText(true);
+
+            GridPane grid = new GridPane();
+            grid.setHgap(10);
+            grid.setVgap(10);
+            grid.setPadding(new Insets(10, 0, 10, 0));
+            grid.add(explanation, 0, 0, 2, 1);
+            grid.add(new Label("Password:"), 0, 1);
+            grid.add(password, 1, 1);
+            grid.add(new Label("Confirm:"), 0, 2);
+            grid.add(confirm, 1, 2);
+            grid.add(warning, 0, 3, 2, 1);
+
+            dialog.getDialogPane().setContent(grid);
+            dialog.setResultConverter(button ->
+                    button == createButton
+                            ? password.getText().toCharArray()
+                            : null
+            );
+
+            Platform.runLater(password::requestFocus);
+            Optional<char[]> result = dialog.showAndWait();
+
+            if (result.isEmpty()) {
+                password.clear();
+                confirm.clear();
+                return false;
+            }
+
+            char[] supplied = result.get();
+            char[] confirmation = confirm.getText().toCharArray();
+
+            try {
+                if (supplied.length < 8) {
+                    showVaultMessage(
+                            owner,
+                            "Password Too Short",
+                            "Use at least 8 characters for your Zorza vault password."
+                    );
+                    continue;
+                }
+
+                if (!Arrays.equals(supplied, confirmation)) {
+                    showVaultMessage(
+                            owner,
+                            "Passwords Do Not Match",
+                            "The two vault passwords do not match."
+                    );
+                    continue;
+                }
+
+                VaultService.unlock(supplied);
+                return true;
+
+            } finally {
+                Arrays.fill(supplied, '\0');
+                Arrays.fill(confirmation, '\0');
+                password.clear();
+                confirm.clear();
+            }
+        }
+    }
+
+    private boolean requestVaultPassword(Stage owner) {
+        while (true) {
+            Dialog<char[]> dialog = new Dialog<>();
+            dialog.setTitle("Unlock Zorza Notes");
+            dialog.setHeaderText("Unlock your encrypted Zorza vault");
+
+            ButtonType unlockButton = new ButtonType(
+                    "Unlock",
+                    ButtonBar.ButtonData.OK_DONE
+            );
+
+            dialog.getDialogPane().getButtonTypes().addAll(
+                    unlockButton,
+                    ButtonType.CANCEL
+            );
+
+            PasswordField password = new PasswordField();
+            password.setPromptText("Vault password");
+
+            VBox content = new VBox(
+                    10,
+                    new Label("Enter your Zorza vault password."),
+                    password
+            );
+            content.setPadding(new Insets(10, 0, 10, 0));
+            dialog.getDialogPane().setContent(content);
+
+            dialog.setResultConverter(button ->
+                    button == unlockButton
+                            ? password.getText().toCharArray()
+                            : null
+            );
+
+            Platform.runLater(password::requestFocus);
+            Optional<char[]> result = dialog.showAndWait();
+
+            if (result.isEmpty()) {
+                password.clear();
+                return false;
+            }
+
+            char[] supplied = result.get();
+
+            try {
+                if (supplied.length == 0) {
+                    showVaultMessage(
+                            owner,
+                            "Password Required",
+                            "Enter your Zorza vault password."
+                    );
+                    continue;
+                }
+
+                VaultService.unlock(supplied);
+
+                try (var connection = Database.connect()) {
+                    VaultService.verifyConnection(connection);
+                }
+
+                return true;
+
+            } catch (Exception exception) {
+                VaultService.clearPassword();
+                showVaultMessage(
+                        owner,
+                        "Unable to Unlock Vault",
+                        "The password was not accepted. Please try again."
+                );
+
+            } finally {
+                Arrays.fill(supplied, '\0');
+                password.clear();
+            }
+        }
+    }
+
+    private void showVaultMessage(Stage owner, String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.initOwner(owner);
+        alert.setTitle(title);
+        alert.setHeaderText(title);
+        alert.setContentText(message);
+        alert.showAndWait();
     }
 
     // =============================================================
