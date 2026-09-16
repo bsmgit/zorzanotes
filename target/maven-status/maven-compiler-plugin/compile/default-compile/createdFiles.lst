@@ -1,4 +1,5 @@
 org/zorzanotes/AppSettings.class
+org/zorzanotes/ZorzaLauncher.class
 org/zorzanotes/ThemeManager.class
 org/zorzanotes/ZorzaNotes$1.class
 org/zorzanotes/MarkdownEditor.class

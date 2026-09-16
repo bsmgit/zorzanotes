@@ -113,7 +113,7 @@ $JPackageArguments = @(
     "--vendor", "Zorza",
     "--input", "$ProjectRoot\target\package",
     "--main-jar", "zorza-notes.jar",
-    "--main-class", "org.zorzanotes.ZorzaNotes",
+    "--main-class", "org.zorzanotes.ZorzaLauncher",
     "--dest", $WorkDir,
     "--win-menu",
     "--win-menu-group", "Zorza",

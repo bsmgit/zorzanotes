@@ -9,8 +9,12 @@ import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.*;
+import javafx.scene.text.Font;
+import javafx.scene.text.FontWeight;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 import javafx.util.Duration;
 
 import java.io.File;
@@ -18,6 +22,12 @@ import java.io.IOException;
 import java.util.List;
 
 public class ZorzaNotes extends Application {
+
+    public static final String APP_NAME = "Zorza Notes";
+    public static final String APP_VERSION = "1.0.0";
+    public static final String APP_URL = "https://zorzanotes.com";
+    public static final String APP_TAGLINE = "Your thoughts belong to you.";
+    public static final String APP_LICENSE = "MIT License";
 
     private final NotebookRepository notebookRepository =
             new NotebookRepository();
@@ -949,11 +959,52 @@ public class ZorzaNotes extends Application {
                         textSizeMenu
                 );
 
+        // =========================================================
+        // HELP MENU
+        // =========================================================
+
+        Menu helpMenu =
+                new Menu("Help");
+
+        MenuItem about =
+                new MenuItem(
+                        "About Zorza Notes"
+                );
+
+        helpMenu.getItems()
+                .add(
+                        about
+                );
+
+        // =========================================================
+        // MENU BAR
+        // =========================================================
+
         MenuBar menuBar =
                 new MenuBar(
                         fileMenu,
-                        settingsMenu
+                        settingsMenu,
+                        helpMenu
                 );
+
+        /*
+         * On macOS this moves the JavaFX menu into the normal
+         * system menu bar at the top of the screen.
+         *
+         * Windows and Linux ignore this and display the menu
+         * inside the application window.
+         */
+        menuBar.setUseSystemMenuBar(true);
+
+        // =========================================================
+        // ABOUT
+        // =========================================================
+
+        about.setOnAction(event ->
+                showAboutWindow(
+                        stage
+                )
+        );
 
         // =========================================================
         // EXPORT
@@ -1131,7 +1182,7 @@ public class ZorzaNotes extends Application {
 
         Label tagline =
                 new Label(
-                        "Your thoughts belong to you."
+                        APP_TAGLINE
                 );
 
         VBox branding =
@@ -1279,7 +1330,7 @@ public class ZorzaNotes extends Application {
         // =========================================================
 
         stage.setTitle(
-                "Zorza Notes"
+                APP_NAME
         );
 
         stage.setMinWidth(
@@ -1303,6 +1354,160 @@ public class ZorzaNotes extends Application {
         );
 
         stage.show();
+    }
+
+    // =============================================================
+    // ABOUT WINDOW
+    // =============================================================
+
+    private void showAboutWindow(
+            Stage owner) {
+
+        Stage aboutStage =
+                new Stage();
+
+        aboutStage.initOwner(
+                owner
+        );
+
+        aboutStage.initModality(
+                Modality.WINDOW_MODAL
+        );
+
+        aboutStage.initStyle(
+                StageStyle.UTILITY
+        );
+
+        aboutStage.setTitle(
+                "About Zorza Notes"
+        );
+
+        aboutStage.setResizable(
+                false
+        );
+
+        Label dawnSymbol =
+                new Label("☀");
+
+        dawnSymbol.setFont(
+                Font.font(
+                        54
+                )
+        );
+
+        Label name =
+                new Label(
+                        "ZORZA NOTES"
+                );
+
+        name.setFont(
+                Font.font(
+                        "System",
+                        FontWeight.BOLD,
+                        25
+                )
+        );
+
+        Label tagline =
+                new Label(
+                        APP_TAGLINE
+                );
+
+        Label version =
+                new Label(
+                        "Version " +
+                                APP_VERSION
+                );
+
+        Hyperlink website =
+                new Hyperlink(
+                        "zorzanotes.com"
+                );
+
+        website.setOnAction(event ->
+                getHostServices()
+                        .showDocument(
+                                APP_URL
+                        )
+        );
+
+        Label license =
+                new Label(
+                        "Licensed under the " +
+                                APP_LICENSE
+                );
+
+        Label copyright =
+                new Label(
+                        "Copyright © 2026 Zorza"
+                );
+
+        Separator separator =
+                new Separator();
+
+        Button close =
+                new Button(
+                        "Close"
+                );
+
+        close.setDefaultButton(
+                true
+        );
+
+        close.setOnAction(event ->
+                aboutStage.close()
+        );
+
+        VBox content =
+                new VBox(
+                        10,
+                        dawnSymbol,
+                        name,
+                        tagline,
+                        new Region(),
+                        version,
+                        website,
+                        license,
+                        copyright,
+                        separator,
+                        close
+                );
+
+        content.setAlignment(
+                Pos.CENTER
+        );
+
+        content.setPadding(
+                new Insets(
+                        28,
+                        45,
+                        24,
+                        45
+                )
+        );
+
+        content.setPrefWidth(
+                430
+        );
+
+        Scene aboutScene =
+                new Scene(
+                        content
+                );
+
+        /*
+         * Give the About window the same light/dark and
+         * accessibility settings as the main application.
+         */
+        ThemeManager.apply(
+                aboutScene
+        );
+
+        aboutStage.setScene(
+                aboutScene
+        );
+
+        aboutStage.showAndWait();
     }
 
     // =============================================================

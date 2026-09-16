@@ -88,7 +88,7 @@ jpackage \
   --resource-dir "$RESOURCE_DIR" \
   --input "$PROJECT_ROOT/target/package" \
   --main-jar zorza-notes.jar \
-  --main-class org.zorzanotes.ZorzaNotes \
+  --main-class org.zorzanotes.ZorzaLauncher \
   --dest "$WORK_DIR" \
   --mac-package-identifier org.zorzanotes.app \
   --mac-package-name "Zorza Notes"
