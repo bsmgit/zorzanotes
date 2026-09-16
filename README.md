@@ -414,7 +414,7 @@ Linux packaging is planned as the project develops.
 
 The current release is:
 
-**Zorza Notes 1.0.0**
+**Zorza Notes 1.0.1**
 
 The version is displayed from within the application's About window.
 
