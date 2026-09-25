@@ -6,9 +6,7 @@ Zorza Notes is a private, local-first, open-source desktop notes application bui
 
 There is no mandatory account, no required cloud service, and no internet connection required to use your notebook.
 
-Your notes live on your computer.
-
-🌅 **Zorza** means *dawn* — a fitting name for a quiet place to begin writing.
+Your notes live on your computer and are protected by an encrypted local database.
 
 ---
 
@@ -25,6 +23,14 @@ Zorza is designed around a straightforward three-pane interface:
 * Editor
 
 No complicated workspace hierarchy is required just to write something down.
+
+### 🔐 Encrypted at Rest
+
+Zorza Notes stores your notebooks and notes in an encrypted local SQLite database.
+
+You choose your Zorza password when the application is launched for the first time. That password is used to unlock your notes.
+
+Encryption and decryption take place locally on your computer. Your Zorza password and the contents of your notebook are not sent to a Zorza server.
 
 ### 🔎 Full-Text Search
 
@@ -87,6 +93,29 @@ The editor includes useful everyday writing features such as:
 
 ---
 
+# First Launch
+
+When you start Zorza Notes for the first time, you will be asked to create a password.
+
+## Setting Your Password
+
+1. Launch **Zorza Notes**.
+2. Enter the password you want to use to protect your notebook.
+3. Confirm the password when prompted.
+4. Continue into Zorza Notes.
+
+Zorza will create your encrypted local database and use your password to unlock it.
+
+On future launches, enter your Zorza password to unlock your notes.
+
+### Important
+
+Keep your Zorza password somewhere safe.
+
+Your password protects the encrypted database containing your notes. Zorza's local-first design means your notebook is not dependent on a Zorza cloud account or remote service.
+
+---
+
 # Privacy by Design
 
 ## Your Computer. Your Database. Your Notes.
@@ -97,11 +126,11 @@ Your notebook is stored locally rather than requiring a Zorza cloud account.
 
 Zorza's design principles are simple:
 
+* Encrypted local storage
 * No mandatory account
 * No mandatory cloud service
 * No required internet connection
 * No telemetry required to use the application
-* Local SQLite storage
 * Portable Markdown export
 * User-owned data
 
@@ -113,7 +142,7 @@ That is intentional.
 
 # Local Storage
 
-Zorza stores application data in a local SQLite database named:
+Zorza stores application data in an encrypted local SQLite database named:
 
 `zorza.db`
 
@@ -137,26 +166,23 @@ If `XDG_DATA_HOME` is configured on Linux, Zorza uses that location instead.
 
 # Encryption
 
-Encryption at rest is an important part of the Zorza architecture.
+Zorza Notes protects its local database with encryption at rest.
 
-Zorza uses an encryption-capable SQLite JDBC implementation, and encrypted SQLite database creation, writing, reopening, and incorrect-password rejection have been successfully tested during development.
+When Zorza is launched for the first time, you create a password used to protect your notebook. On subsequent launches, the database must be unlocked before your notes can be accessed.
 
-However, **the primary Zorza Notes database is not yet migrated to encrypted storage**.
+Encryption is performed locally on your computer.
 
-The encryption migration is being developed carefully so that existing user data is not put at risk.
+Zorza's encryption design follows the same philosophy as the rest of the application:
 
-The planned encrypted-storage system includes:
+* Your notes remain local.
+* Your database is encrypted at rest.
+* Your password protects access to your notebook.
+* Encryption and decryption happen locally.
+* Your notes do not need to be sent to a server.
+* Your password does not need to be sent to a Zorza server.
+* Zorza relies on established encryption technology rather than custom cryptography.
 
-* Password-protected encrypted SQLite storage
-* Encryption and decryption performed locally
-* No password stored in the notes database
-* No password transmitted to a Zorza server
-* Safe migration of existing plaintext databases
-* Preservation of note and notebook identifiers
-* Migration verification before replacement
-* A plaintext safety backup during migration
-
-Until that migration is complete and verified, Zorza does **not** claim that existing `zorza.db` databases are encrypted at rest.
+The purpose is simple: if someone obtains a copy of your `zorza.db` file, its contents should not simply be readable as an ordinary plaintext SQLite database.
 
 ---
 
@@ -215,7 +241,7 @@ JavaFX / OpenJFX
 
 ### Database
 
-SQLite
+Encrypted SQLite
 
 ### Database Access
 
@@ -241,31 +267,18 @@ Native application packages include the Java runtime required to run Zorza, so e
 
 # Architecture
 
-The project follows a simple separation of responsibilities.
+Zorza keeps the application architecture deliberately straightforward.
 
-Typical components include:
+The application is divided into a small number of responsibilities including:
 
-```text
-ZorzaNotes
-    │
-    ├── UI / JavaFX
-    │
-    ├── MarkdownEditor
-    │
-    ├── AppSettings
-    │
-    ├── ThemeManager
-    │
-    ├── ExportImportService
-    │
-    ├── NotebookRepository
-    │
-    ├── NoteRepository
-    │
-    └── Database
-            │
-            └── SQLite
-```
+* JavaFX user interface
+* Markdown editor
+* Application settings
+* Theme management
+* Import and export
+* Notebook and note repositories
+* Database management
+* Local encrypted storage
 
 The goal is not to build the most elaborate architecture possible.
 
@@ -314,6 +327,8 @@ The application can be run through the JavaFX Maven plugin:
 mvn clean javafx:run
 ```
 
+On the first launch, Zorza will prompt you to establish the password for your encrypted notebook.
+
 ---
 
 # IntelliJ IDEA
@@ -336,53 +351,6 @@ org.zorzanotes
 
 ---
 
-# Project Structure
-
-A typical source tree looks like:
-
-```text
-zorzanotes/
-├── pom.xml
-├── README.md
-├── LICENSE
-│
-├── src/
-│   └── main/
-│       ├── java/
-│       │   └── org/
-│       │       └── zorzanotes/
-│       │           ├── ZorzaLauncher.java
-│       │           ├── ZorzaNotes.java
-│       │           ├── Database.java
-│       │           ├── Notebook.java
-│       │           ├── Note.java
-│       │           ├── NotebookRepository.java
-│       │           ├── NoteRepository.java
-│       │           ├── MarkdownEditor.java
-│       │           ├── ExportImportService.java
-│       │           ├── AppSettings.java
-│       │           └── ThemeManager.java
-│       │
-│       └── resources/
-│
-├── packaging/
-│   ├── mac/
-│   │   ├── build-dmg.sh
-│   │   ├── zorza-icon.png
-│   │   ├── Zorza.icns
-│   │   └── resources/
-│   │
-│   └── windows/
-│       ├── build-msi.ps1
-│       └── Zorza.ico
-│
-└── releases/
-```
-
-The exact contents may change as development continues.
-
----
-
 # macOS Build
 
 Zorza uses `jpackage` to create a self-contained macOS application and DMG installer.
@@ -398,8 +366,6 @@ The completed installer is placed in:
 ```text
 releases/
 ```
-
-The macOS package includes the runtime required by Zorza.
 
 Users do not need to install Java separately.
 
@@ -421,7 +387,7 @@ The resulting MSI is placed in:
 releases/
 ```
 
-Do not build the Maven package on macOS and copy `target/package` to Windows. Run the Maven build on the target operating system so Maven obtains the appropriate native JavaFX components.
+Run the Maven build on the target operating system so Maven obtains the appropriate native JavaFX components.
 
 ---
 
@@ -448,7 +414,7 @@ Linux packaging is planned as the project develops.
 
 The current release is:
 
-**Zorza Notes 1.0.0**
+**Zorza Notes 1.0.1**
 
 The version is displayed from within the application's About window.
 
@@ -520,9 +486,13 @@ The desktop application should remain useful without a network connection.
 
 A user should always have a reasonable path to get their writing out of Zorza.
 
+## Encrypted at Rest
+
+Writing stored in the Zorza database should not be left as ordinary plaintext on disk.
+
 ## Simple Storage
 
-SQLite provides a mature, portable, understandable storage layer without requiring a database server.
+SQLite provides a mature, portable and understandable storage layer without requiring a database server.
 
 ## Open Formats
 
@@ -546,9 +516,6 @@ Zorza favors understandable technology and straightforward code over unnecessary
 
 Development areas include:
 
-* Encrypted `zorza.db` storage
-* Safe plaintext-to-encrypted database migration
-* Password-based vault unlocking
 * Additional Markdown editing improvements
 * Packaging improvements
 * macOS signing and notarization
@@ -564,13 +531,13 @@ Features on the roadmap are not promises or descriptions of functionality alread
 
 # Security
 
-Zorza's security model is still being developed.
+Zorza Notes is designed to keep its security model straightforward.
+
+The local notes database is protected by encryption at rest and unlocked using the password established by the user.
+
+Zorza relies on established cryptographic implementations rather than inventing its own encryption algorithms.
 
 If you discover a security problem, please avoid publishing sensitive exploit details until the issue can be investigated and corrected.
-
-The project should rely on established cryptographic implementations rather than custom cryptography.
-
-Encryption-related changes should be treated carefully, particularly when they involve migration of an existing user's notes.
 
 ---
 
@@ -578,11 +545,11 @@ Encryption-related changes should be treated carefully, particularly when they i
 
 Zorza is local-first, which also means users should maintain backups of important data.
 
-Markdown export provides one portable backup option.
+Markdown export provides a portable backup option.
 
-Users may also back up the Zorza application-data directory containing `zorza.db`.
+Users may also back up the Zorza application-data directory containing the encrypted `zorza.db`.
 
-Before performing database migrations or other potentially destructive development work, make a backup.
+Remember that Markdown exports are ordinary readable files. If an exported Markdown backup contains sensitive information, protect that backup appropriately.
 
 ---
 
@@ -592,7 +559,7 @@ Many modern applications begin with a login screen.
 
 Zorza begins with a notebook.
 
-There is value in software that simply runs on your computer, opens your files, stores your work locally, and does not require an ongoing relationship with a remote service.
+There is value in software that simply runs on your computer, stores your work locally, protects that local storage, and does not require an ongoing relationship with a remote service.
 
 Zorza Notes is an attempt to build that kind of software.
 
@@ -638,8 +605,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-A copy of the license should also be included in the repository as `LICENSE`.
-
 ---
 
 # Links
@@ -659,5 +624,5 @@ git clone https://github.com/bsmgit/zorzanotes.git
 <p align="center">
 <strong>Zorza Notes</strong><br>
 <em>Your thoughts belong to you.</em><br><br>
-Open source · Local first · MIT licensed
+Open source · Local first · Encrypted · MIT licensed
 </p>
