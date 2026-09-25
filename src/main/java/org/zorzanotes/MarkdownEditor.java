@@ -10,7 +10,9 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Font;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,6 +32,17 @@ public class MarkdownEditor extends VBox {
             new FlowPane();
 
     private HostServices hostServices;
+
+    private Runnable deleteNoteHandler;
+
+    private final HBox searchMatchBar = new HBox(8);
+    private final Button previousMatch = new Button("‹ Previous");
+    private final Button nextMatch = new Button("Next ›");
+    private final Label searchMatchLabel = new Label();
+
+    private final List<int[]> searchMatches = new ArrayList<>();
+    private int currentSearchMatch = -1;
+    private String activeSearchQuery = "";
 
     // -------------------------------------------------------------
     // URL DETECTION
@@ -133,6 +146,19 @@ public class MarkdownEditor extends VBox {
                 new Tooltip("Redo")
         );
 
+        Button deleteNote =
+                new Button("Delete Note");
+
+        deleteNote.setTooltip(
+                new Tooltip("Delete the current note")
+        );
+
+        deleteNote.setOnAction(event -> {
+            if (deleteNoteHandler != null) {
+                deleteNoteHandler.run();
+            }
+        });
+
         // =========================================================
         // TOOLBAR
         // =========================================================
@@ -147,7 +173,9 @@ public class MarkdownEditor extends VBox {
                         numberList,
                         new Separator(),
                         undo,
-                        redo
+                        redo,
+                        new Separator(),
+                        deleteNote
                 );
 
         toolbar.setPadding(
@@ -270,11 +298,28 @@ public class MarkdownEditor extends VBox {
                         });
 
         // =========================================================
+        // SEARCH MATCH NAVIGATION
+        // =========================================================
+
+        searchMatchBar.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+        searchMatchBar.getChildren().addAll(
+                previousMatch,
+                searchMatchLabel,
+                nextMatch
+        );
+        searchMatchBar.setVisible(false);
+        searchMatchBar.setManaged(false);
+
+        previousMatch.setOnAction(event -> previousSearchMatch());
+        nextMatch.setOnAction(event -> nextSearchMatch());
+
+        // =========================================================
         // LAYOUT
         // =========================================================
 
         getChildren().addAll(
                 toolbar,
+                searchMatchBar,
                 editor,
                 linkPane
         );
@@ -755,6 +800,125 @@ public class MarkdownEditor extends VBox {
         return index;
     }
 
+
+    // =============================================================
+    // SEARCH HIGHLIGHTING / NAVIGATION
+    // =============================================================
+
+    public int showSearchMatches(String query) {
+        activeSearchQuery = query == null ? "" : query.trim();
+        rebuildSearchMatches();
+
+        if (searchMatches.isEmpty()) {
+            searchMatchBar.setVisible(false);
+            searchMatchBar.setManaged(false);
+            editor.deselect();
+            return 0;
+        }
+
+        searchMatchBar.setVisible(true);
+        searchMatchBar.setManaged(true);
+        currentSearchMatch = 0;
+        selectCurrentSearchMatch();
+        return searchMatches.size();
+    }
+
+    public void clearSearchMatches() {
+        activeSearchQuery = "";
+        searchMatches.clear();
+        currentSearchMatch = -1;
+        searchMatchBar.setVisible(false);
+        searchMatchBar.setManaged(false);
+        editor.deselect();
+    }
+
+    public int getSearchMatchCount() {
+        return searchMatches.size();
+    }
+
+    private void rebuildSearchMatches() {
+        searchMatches.clear();
+        currentSearchMatch = -1;
+
+        if (activeSearchQuery.isBlank()) {
+            return;
+        }
+
+        String cleaned = activeSearchQuery
+                .replaceAll("[^\\p{L}\\p{N}_]+", " ")
+                .trim();
+
+        if (cleaned.isBlank()) {
+            return;
+        }
+
+        String text = editor.getText();
+        Set<String> uniqueRanges = new LinkedHashSet<>();
+
+        for (String term : cleaned.split("\\s+")) {
+            if (term.isBlank()) {
+                continue;
+            }
+
+            Pattern pattern = Pattern.compile(
+                    "(?iu)(?<![\\p{L}\\p{N}_])" +
+                            Pattern.quote(term) +
+                            "[\\p{L}\\p{N}_]*"
+            );
+
+            Matcher matcher = pattern.matcher(text);
+            while (matcher.find()) {
+                String key = matcher.start() + ":" + matcher.end();
+                if (uniqueRanges.add(key)) {
+                    searchMatches.add(new int[] {matcher.start(), matcher.end()});
+                }
+            }
+        }
+
+        searchMatches.sort((a, b) -> Integer.compare(a[0], b[0]));
+    }
+
+    private void previousSearchMatch() {
+        if (searchMatches.isEmpty()) {
+            return;
+        }
+
+        currentSearchMatch--;
+        if (currentSearchMatch < 0) {
+            currentSearchMatch = searchMatches.size() - 1;
+        }
+        selectCurrentSearchMatch();
+    }
+
+    private void nextSearchMatch() {
+        if (searchMatches.isEmpty()) {
+            return;
+        }
+
+        currentSearchMatch++;
+        if (currentSearchMatch >= searchMatches.size()) {
+            currentSearchMatch = 0;
+        }
+        selectCurrentSearchMatch();
+    }
+
+    private void selectCurrentSearchMatch() {
+        if (currentSearchMatch < 0 || currentSearchMatch >= searchMatches.size()) {
+            return;
+        }
+
+        int[] match = searchMatches.get(currentSearchMatch);
+        editor.requestFocus();
+        editor.selectRange(match[0], match[1]);
+
+        searchMatchLabel.setText(
+                (currentSearchMatch + 1) +
+                        " of " +
+                        searchMatches.size() +
+                        " matches"
+        );
+    }
+
     // =============================================================
     // PUBLIC API
     // =============================================================
@@ -772,10 +936,15 @@ public class MarkdownEditor extends VBox {
                         ? ""
                         : text
         );
+
+        if (!activeSearchQuery.isBlank()) {
+            rebuildSearchMatches();
+        }
     }
 
     public void clear() {
 
+        clearSearchMatches();
         editor.clear();
     }
 
@@ -795,5 +964,12 @@ public class MarkdownEditor extends VBox {
     public void requestEditorFocus() {
 
         editor.requestFocus();
+    }
+
+    public void setOnDeleteNote(
+            Runnable deleteNoteHandler) {
+
+        this.deleteNoteHandler =
+                deleteNoteHandler;
     }
 }

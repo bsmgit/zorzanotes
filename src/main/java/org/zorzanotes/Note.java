@@ -4,7 +4,7 @@ public class Note {
 
     private final long id;
     private final String uuid;
-    private final long notebookId;
+    private long notebookId;
     private String title;
     private String body;
 
@@ -30,6 +30,10 @@ public class Note {
         return notebookId;
     }
 
+    public void setNotebookId(long notebookId) {
+        this.notebookId = notebookId;
+    }
+
     public String getTitle() {
         return title;
     }
@@ -48,6 +52,8 @@ public class Note {
 
     @Override
     public String toString() {
-        return title.isBlank() ? "Untitled Note" : title;
+        return title == null || title.isBlank()
+                ? "Untitled Note"
+                : title;
     }
 }

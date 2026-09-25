@@ -438,6 +438,53 @@ public class NoteRepository {
     }
 
     // =============================================================
+    // MOVE NOTE TO ANOTHER NOTEBOOK
+    // =============================================================
+
+    public void moveToNotebook(
+            long noteId,
+            long targetNotebookId) {
+
+        String sql = """
+                UPDATE notes
+                SET notebook_id = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """;
+
+        try (Connection connection =
+                     Database.connect();
+
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+
+            statement.setLong(
+                    1,
+                    targetNotebookId
+            );
+
+            statement.setString(
+                    2,
+                    Instant.now().toString()
+            );
+
+            statement.setLong(
+                    3,
+                    noteId
+            );
+
+            statement.executeUpdate();
+
+        } catch (SQLException e) {
+
+            throw new RuntimeException(
+                    "Unable to move note.",
+                    e
+            );
+        }
+    }
+
+    // =============================================================
     // DELETE NOTE
     // =============================================================
 

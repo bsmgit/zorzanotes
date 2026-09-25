@@ -8,6 +8,9 @@ import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.input.KeyCode;
+import javafx.scene.input.Dragboard;
+import javafx.scene.input.TransferMode;
+import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.*;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
@@ -23,11 +26,15 @@ import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class ZorzaNotes extends Application {
 
     public static final String APP_NAME = "Zorza Notes";
-    public static final String APP_VERSION = "1.0.0";
+    public static final String APP_VERSION = "1.2.0";
     public static final String APP_URL = "https://zorzanotes.com";
     public static final String APP_TAGLINE = "Your thoughts belong to you.";
     public static final String APP_LICENSE = "MIT License";
@@ -65,6 +72,12 @@ public class ZorzaNotes extends Application {
      * atomically without temporarily clearing the editor.
      */
     private boolean programmaticNavigation = false;
+
+    /*
+     * Prevents programmatic changes to the global search field
+     * from starting a new search after a result is opened.
+     */
+    private boolean suppressSearchRefresh = false;
 
     @Override
     public void start(Stage stage) {
@@ -177,6 +190,51 @@ public class ZorzaNotes extends Application {
         );
 
         // =========================================================
+        // LIBRARY TREE
+        // =========================================================
+
+        Label libraryTitle =
+                new Label("LIBRARY");
+
+        TreeView<Object> libraryTree =
+                new TreeView<>();
+
+        libraryTree.setShowRoot(false);
+        libraryTree.setPrefWidth(330);
+
+        HBox libraryButtons =
+                new HBox(
+                        8,
+                        newNotebook,
+                        newNote
+                );
+
+
+        VBox libraryPane =
+                new VBox(
+                        10,
+                        libraryTitle,
+                        libraryTree,
+                        libraryButtons
+                );
+
+        libraryPane.setPadding(
+                new Insets(20)
+        );
+
+        libraryPane.setPrefWidth(330);
+        libraryPane.setMinWidth(260);
+
+        VBox.setVgrow(
+                libraryTree,
+                Priority.ALWAYS
+        );
+
+        rebuildLibraryTree(
+                libraryTree
+        );
+
+        // =========================================================
         // EDITOR
         // =========================================================
 
@@ -251,6 +309,7 @@ public class ZorzaNotes extends Application {
             );
 
             notes.refresh();
+            libraryTree.refresh();
 
             status.setText(
                     "Saved locally"
@@ -269,6 +328,24 @@ public class ZorzaNotes extends Application {
 
                                 return;
                             }
+
+                            /*
+                             * Keep the in-memory note and its TreeView item
+                             * synchronized immediately while the user types.
+                             * The repository write still happens through the
+                             * normal autosave timer below.
+                             */
+                            currentNote.setTitle(
+                                    cleanTitle(newValue)
+                            );
+
+                            updateNoteTitleInTree(
+                                    libraryTree,
+                                    currentNote.getId(),
+                                    currentNote.getTitle()
+                            );
+
+                            notes.refresh();
 
                             status.setText(
                                     "Saving..."
@@ -442,6 +519,8 @@ public class ZorzaNotes extends Application {
                         notebooks
                                 .getSelectionModel()
                                 .select(notebook);
+
+                        rebuildLibraryTree(libraryTree);
                     });
         });
 
@@ -520,6 +599,8 @@ public class ZorzaNotes extends Application {
                         status.setText(
                                 "Notebook deleted"
                         );
+
+                        rebuildLibraryTree(libraryTree);
                     });
         });
 
@@ -566,6 +647,8 @@ public class ZorzaNotes extends Application {
             noteTitle.requestFocus();
 
             noteTitle.selectAll();
+
+            rebuildLibraryTree(libraryTree);
         });
 
         // =========================================================
@@ -636,8 +719,313 @@ public class ZorzaNotes extends Application {
                         status.setText(
                                 "Note deleted"
                         );
+
+                        rebuildLibraryTree(libraryTree);
                     });
         });
+
+        // =========================================================
+        // EDITOR DELETE NOTE BUTTON
+        // =========================================================
+
+        editor.setOnDeleteNote(
+                deleteNote::fire
+        );
+
+        // =========================================================
+        // RIGHT-CLICK MENUS + DRAG/DROP NOTE MOVING
+        // =========================================================
+
+        libraryTree.setCellFactory(tree ->
+                new TreeCell<>() {
+
+                    @Override
+                    protected void updateItem(
+                            Object item,
+                            boolean empty) {
+
+                        super.updateItem(item, empty);
+
+                        setContextMenu(null);
+                        setOnDragDetected(null);
+                        setOnDragOver(null);
+                        setOnDragDropped(null);
+                        setOnDragDone(null);
+
+                        if (empty || item == null) {
+                            setText(null);
+                            return;
+                        }
+
+                        setText(item.toString());
+
+                        if (item instanceof Note note) {
+
+                            // -------------------------------------------------
+                            // RIGHT CLICK: MOVE NOTE
+                            // -------------------------------------------------
+
+                            Menu moveMenu =
+                                    new Menu("Move to Notebook");
+
+                            for (Notebook targetNotebook : notebookRepository.findAll()) {
+
+                                if (targetNotebook.getId() == note.getNotebookId()) {
+                                    continue;
+                                }
+
+                                MenuItem targetItem =
+                                        new MenuItem(targetNotebook.getName());
+
+                                targetItem.setOnAction(event -> {
+
+                                    libraryTree.getSelectionModel()
+                                            .select(getTreeItem());
+
+                                    moveNoteToNotebook(
+                                            note,
+                                            targetNotebook,
+                                            libraryTree,
+                                            notebooks,
+                                            notes,
+                                            noteTitle,
+                                            editor,
+                                            deleteNote,
+                                            status
+                                    );
+                                });
+
+                                moveMenu.getItems().add(targetItem);
+                            }
+
+                            if (moveMenu.getItems().isEmpty()) {
+                                MenuItem nowhere =
+                                        new MenuItem("No other notebooks");
+                                nowhere.setDisable(true);
+                                moveMenu.getItems().add(nowhere);
+                            }
+
+                            // -------------------------------------------------
+                            // RIGHT CLICK: DELETE NOTE
+                            // -------------------------------------------------
+
+                            MenuItem deleteNoteItem =
+                                    new MenuItem("Delete Note...");
+
+                            deleteNoteItem.setOnAction(event -> {
+
+                                libraryTree.getSelectionModel()
+                                        .select(getTreeItem());
+
+                                Alert confirmation =
+                                        new Alert(Alert.AlertType.CONFIRMATION);
+
+                                confirmation.initOwner(stage);
+                                confirmation.setTitle("Delete Note");
+                                confirmation.setHeaderText(
+                                        "Delete \"" + note.getTitle() + "\"?"
+                                );
+                                confirmation.setContentText(
+                                        "This note will be permanently deleted."
+                                );
+
+                                confirmation.showAndWait()
+                                        .ifPresent(result -> {
+
+                                            if (result != ButtonType.OK) {
+                                                return;
+                                            }
+
+                                            autoSaveTimer.stop();
+
+                                            if (currentNote != null &&
+                                                    currentNote.getId() == note.getId()) {
+
+                                                currentNote = null;
+                                                clearEditor(noteTitle, editor);
+                                                deleteNote.setDisable(true);
+                                            }
+
+                                            noteRepository.delete(note);
+
+                                            notes.getItems()
+                                                    .removeIf(existing ->
+                                                            existing.getId() == note.getId());
+
+                                            status.setText("Note deleted");
+                                            rebuildLibraryTree(libraryTree);
+                                        });
+                            });
+
+                            setContextMenu(
+                                    new ContextMenu(
+                                            moveMenu,
+                                            new SeparatorMenuItem(),
+                                            deleteNoteItem
+                                    )
+                            );
+
+                            // -------------------------------------------------
+                            // DRAG NOTE
+                            // -------------------------------------------------
+
+                            setOnDragDetected(event -> {
+
+                                Dragboard dragboard =
+                                        startDragAndDrop(TransferMode.MOVE);
+
+                                ClipboardContent content =
+                                        new ClipboardContent();
+
+                                content.putString(
+                                        "zorza-note:" + note.getId()
+                                );
+
+                                dragboard.setContent(content);
+                                event.consume();
+                            });
+
+                        } else if (item instanceof Notebook notebook) {
+
+                            // -------------------------------------------------
+                            // RIGHT CLICK: DELETE NOTEBOOK
+                            // -------------------------------------------------
+
+                            MenuItem deleteNotebookItem =
+                                    new MenuItem("Delete Notebook...");
+
+                            deleteNotebookItem.setOnAction(event -> {
+
+                                libraryTree.getSelectionModel()
+                                        .select(getTreeItem());
+
+                                Alert confirmation =
+                                        new Alert(Alert.AlertType.CONFIRMATION);
+
+                                confirmation.initOwner(stage);
+                                confirmation.setTitle("Delete Notebook");
+                                confirmation.setHeaderText(
+                                        "Delete \"" + notebook.getName() + "\"?"
+                                );
+                                confirmation.setContentText(
+                                        "All notes inside this notebook will also be permanently deleted."
+                                );
+
+                                confirmation.showAndWait()
+                                        .ifPresent(result -> {
+
+                                            if (result != ButtonType.OK) {
+                                                return;
+                                            }
+
+                                            autoSaveTimer.stop();
+
+                                            if (currentNote != null &&
+                                                    currentNote.getNotebookId() == notebook.getId()) {
+
+                                                currentNote = null;
+                                                clearEditor(noteTitle, editor);
+                                                deleteNote.setDisable(true);
+                                            }
+
+                                            notebookRepository.delete(notebook);
+
+                                            notebooks.getItems()
+                                                    .removeIf(existing ->
+                                                            existing.getId() == notebook.getId());
+
+                                            Notebook selectedNotebook =
+                                                    notebooks.getSelectionModel()
+                                                            .getSelectedItem();
+
+                                            if (selectedNotebook != null &&
+                                                    selectedNotebook.getId() == notebook.getId()) {
+
+                                                notebooks.getSelectionModel()
+                                                        .clearSelection();
+                                            }
+
+                                            notes.getItems().clear();
+                                            deleteNotebook.setDisable(true);
+                                            status.setText("Notebook deleted");
+                                            rebuildLibraryTree(libraryTree);
+                                        });
+                            });
+
+                            setContextMenu(
+                                    new ContextMenu(deleteNotebookItem)
+                            );
+
+                            // -------------------------------------------------
+                            // DROP NOTE ON NOTEBOOK
+                            // -------------------------------------------------
+
+                            setOnDragOver(event -> {
+
+                                Dragboard dragboard =
+                                        event.getDragboard();
+
+                                if (dragboard.hasString() &&
+                                        dragboard.getString().startsWith("zorza-note:")) {
+
+                                    event.acceptTransferModes(TransferMode.MOVE);
+                                }
+
+                                event.consume();
+                            });
+
+                            setOnDragDropped(event -> {
+
+                                Dragboard dragboard =
+                                        event.getDragboard();
+
+                                boolean completed = false;
+
+                                if (dragboard.hasString() &&
+                                        dragboard.getString().startsWith("zorza-note:")) {
+
+                                    try {
+                                        long noteId =
+                                                Long.parseLong(
+                                                        dragboard.getString()
+                                                                .substring("zorza-note:".length())
+                                                );
+
+                                        Note draggedNote =
+                                                noteRepository.findById(noteId);
+
+                                        if (draggedNote != null) {
+
+                                            if (draggedNote.getNotebookId() == notebook.getId()) {
+                                                completed = true;
+                                            } else {
+                                                moveNoteToNotebook(
+                                                        draggedNote,
+                                                        notebook,
+                                                        libraryTree,
+                                                        notebooks,
+                                                        notes,
+                                                        noteTitle,
+                                                        editor,
+                                                        deleteNote,
+                                                        status
+                                                );
+                                                completed = true;
+                                            }
+                                        }
+
+                                    } catch (NumberFormatException ignored) {
+                                        completed = false;
+                                    }
+                                }
+
+                                event.setDropCompleted(completed);
+                                event.consume();
+                            });
+                        }
+                    }
+                }
+        );
 
         // =========================================================
         // GLOBAL SEARCH
@@ -662,6 +1050,9 @@ public class ZorzaNotes extends Application {
                             .trim();
 
             if (query.isEmpty()) {
+
+                editor.clearSearchMatches();
+                rebuildLibraryTree(libraryTree);
 
                 restoreSelectedNotebookNotes(
                         notebooks,
@@ -707,18 +1098,34 @@ public class ZorzaNotes extends Application {
                     programmaticNavigation = false;
                 }
 
+                int totalMatches =
+                        countSearchMatches(
+                                results,
+                                query
+                        );
+
+                rebuildSearchTree(
+                        libraryTree,
+                        results,
+                        query
+                );
+
                 notesTitle.setText(
                         "SEARCH RESULTS (" +
                                 results.size() +
-                                ")"
+                                " NOTES · " +
+                                totalMatches +
+                                " MATCHES)"
                 );
 
                 status.setText(
                         results.size() +
-                                " search result" +
-                                (results.size() == 1
-                                        ? ""
-                                        : "s")
+                                " note" +
+                                (results.size() == 1 ? "" : "s") +
+                                " · " +
+                                totalMatches +
+                                " match" +
+                                (totalMatches == 1 ? "" : "es")
                 );
 
             } catch (RuntimeException e) {
@@ -739,11 +1146,95 @@ public class ZorzaNotes extends Application {
                 .addListener(
                         (observable,
                          oldValue,
-                         newValue) ->
+                         newValue) -> {
 
-                                searchTimer
-                                        .playFromStart()
+                            if (suppressSearchRefresh) {
+                                return;
+                            }
+
+                            searchTimer
+                                    .playFromStart();
+                        }
                 );
+
+        // =========================================================
+        // LIBRARY TREE SELECTION
+        // =========================================================
+
+        libraryTree.getSelectionModel()
+                .selectedItemProperty()
+                .addListener((observable, oldItem, selectedItem) -> {
+
+                    if (programmaticNavigation || selectedItem == null) {
+                        return;
+                    }
+
+                    Object value = selectedItem.getValue();
+
+                    if (value instanceof Notebook selectedNotebook) {
+
+                        notebooks.getSelectionModel()
+                                .select(selectedNotebook);
+
+                        return;
+                    }
+
+                    if (!(value instanceof Note selectedNote)) {
+                        return;
+                    }
+
+                    if (!globalSearch.getText().isBlank()) {
+
+                        openSearchResult(
+                                selectedNote,
+                                notebooks,
+                                notes,
+                                noteTitle,
+                                editor,
+                                deleteNote,
+                                deleteNotebook,
+                                status,
+                                globalSearch,
+                                notesTitle
+                        );
+
+                        rebuildLibraryTree(libraryTree);
+                        return;
+                    }
+
+                    Notebook parentNotebook =
+                            findNotebook(
+                                    notebooks,
+                                    selectedNote.getNotebookId()
+                            );
+
+                    if (parentNotebook == null) {
+                        refreshNotebooks(notebooks);
+                        parentNotebook =
+                                findNotebook(
+                                        notebooks,
+                                        selectedNote.getNotebookId()
+                                );
+                    }
+
+                    if (parentNotebook == null) {
+                        return;
+                    }
+
+                    notebooks.getSelectionModel()
+                            .select(parentNotebook);
+
+                    Note noteToSelect =
+                            findNote(
+                                    notes.getItems(),
+                                    selectedNote.getId()
+                            );
+
+                    if (noteToSelect != null) {
+                        notes.getSelectionModel()
+                                .select(noteToSelect);
+                    }
+                });
 
         // =========================================================
         // OPEN SEARCH RESULT WITH MOUSE
@@ -1129,6 +1620,10 @@ public class ZorzaNotes extends Application {
                         notebooks
                 );
 
+                rebuildLibraryTree(
+                        libraryTree
+                );
+
                 status.setText(
                         "Imported " +
                                 count +
@@ -1264,14 +1759,12 @@ public class ZorzaNotes extends Application {
 
         SplitPane splitPane =
                 new SplitPane(
-                        notebookPane,
-                        notesPane,
+                        libraryPane,
                         editorPane
                 );
 
         splitPane.setDividerPositions(
-                0.18,
-                0.42
+                0.26
         );
 
         BorderPane root =
@@ -1661,7 +2154,7 @@ public class ZorzaNotes extends Application {
 
         Label copyright =
                 new Label(
-                        "Copyright © 2026 Zorza"
+                        "Copyright © 2026 Zorza Notes"
                 );
 
         Separator separator =
@@ -1733,6 +2226,242 @@ public class ZorzaNotes extends Application {
     }
 
     // =============================================================
+    // MOVE NOTE TO NOTEBOOK
+    // =============================================================
+
+    private void moveNoteToNotebook(
+            Note note,
+            Notebook targetNotebook,
+            TreeView<Object> libraryTree,
+            ListView<Notebook> notebooks,
+            ListView<Note> notes,
+            TextField noteTitle,
+            MarkdownEditor editor,
+            Button deleteNote,
+            Label status) {
+
+        if (note == null || targetNotebook == null) {
+            return;
+        }
+
+        if (note.getNotebookId() == targetNotebook.getId()) {
+            status.setText("Note is already in that notebook");
+            return;
+        }
+
+        /* Save any unsaved editor changes before changing ownership. */
+        if (currentNote != null && currentNote.getId() == note.getId()) {
+            saveImmediately(noteTitle, editor);
+        }
+
+        noteRepository.moveToNotebook(
+                note.getId(),
+                targetNotebook.getId()
+        );
+
+        /*
+         * Note.notebookId is mutable so the currently open note remains
+         * internally consistent after a move.
+         */
+        if (currentNote != null && currentNote.getId() == note.getId()) {
+            currentNote.setNotebookId(targetNotebook.getId());
+        }
+
+        note.setNotebookId(targetNotebook.getId());
+
+        /* Keep the hidden compatibility ListViews synchronized. */
+        refreshNotebooks(notebooks);
+
+        Notebook refreshedTarget =
+                findNotebook(notebooks, targetNotebook.getId());
+
+        List<Note> targetNotes =
+                noteRepository.findByNotebook(targetNotebook.getId());
+
+        Note movedNote =
+                findNote(targetNotes, note.getId());
+
+        programmaticNavigation = true;
+
+        try {
+            if (refreshedTarget != null) {
+                notebooks.getSelectionModel().select(refreshedTarget);
+            }
+
+            notes.getItems().setAll(targetNotes);
+
+            if (movedNote != null) {
+                notes.getSelectionModel().select(movedNote);
+            }
+        } finally {
+            programmaticNavigation = false;
+        }
+
+        /*
+         * The hidden ListView selection above is intentionally suppressed,
+         * so its normal selection listener cannot load the moved note.
+         * Load it explicitly here.  Without this, the TreeView can show the
+         * note as selected after a move while the editor remains disabled or
+         * continues showing the previous note.
+         */
+        if (movedNote != null) {
+            loadNote(
+                    movedNote,
+                    noteTitle,
+                    editor,
+                    deleteNote,
+                    status
+            );
+        }
+
+        rebuildLibraryTree(libraryTree);
+        selectNoteInTree(libraryTree, note.getId());
+
+        status.setText(
+                "Moved to " + targetNotebook.getName()
+        );
+    }
+
+    private void selectNoteInTree(
+            TreeView<Object> libraryTree,
+            long noteId) {
+
+        TreeItem<Object> root = libraryTree.getRoot();
+
+        if (root == null) {
+            return;
+        }
+
+        programmaticNavigation = true;
+
+        try {
+            for (TreeItem<Object> notebookItem : root.getChildren()) {
+                for (TreeItem<Object> noteItem : notebookItem.getChildren()) {
+                    Object value = noteItem.getValue();
+
+                    if (value instanceof Note note && note.getId() == noteId) {
+                        notebookItem.setExpanded(true);
+                        libraryTree.getSelectionModel().select(noteItem);
+                        libraryTree.scrollTo(libraryTree.getRow(noteItem));
+                        return;
+                    }
+                }
+            }
+        } finally {
+            programmaticNavigation = false;
+        }
+    }
+
+    // =============================================================
+    // LIBRARY TREE
+    // =============================================================
+
+    private void rebuildLibraryTree(
+            TreeView<Object> libraryTree) {
+
+        TreeItem<Object> root =
+                new TreeItem<>("Library");
+
+        for (Notebook notebook : notebookRepository.findAll()) {
+
+            TreeItem<Object> notebookItem =
+                    new TreeItem<>(notebook);
+
+            notebookItem.setExpanded(true);
+
+            for (Note note : noteRepository.findByNotebook(notebook.getId())) {
+                notebookItem.getChildren()
+                        .add(new TreeItem<>(note));
+            }
+
+            root.getChildren()
+                    .add(notebookItem);
+        }
+
+        programmaticNavigation = true;
+
+        try {
+            libraryTree.setRoot(root);
+        } finally {
+            programmaticNavigation = false;
+        }
+    }
+
+    /**
+     * Updates the Note object stored in the visible TreeView without
+     * rebuilding the tree. This preserves expansion and selection while
+     * allowing note titles to change immediately as the user types.
+     */
+    private void updateNoteTitleInTree(
+            TreeView<Object> libraryTree,
+            long noteId,
+            String title) {
+
+        TreeItem<Object> root =
+                libraryTree.getRoot();
+
+        if (root == null) {
+            return;
+        }
+
+        for (TreeItem<Object> notebookItem : root.getChildren()) {
+
+            for (TreeItem<Object> noteItem : notebookItem.getChildren()) {
+
+                Object value =
+                        noteItem.getValue();
+
+                if (value instanceof Note treeNote &&
+                        treeNote.getId() == noteId) {
+
+                    treeNote.setTitle(
+                            cleanTitle(title)
+                    );
+
+                    libraryTree.refresh();
+                    return;
+                }
+            }
+        }
+    }
+
+    private void rebuildSearchTree(
+            TreeView<Object> libraryTree,
+            List<Note> results,
+            String query) {
+
+        TreeItem<Object> root =
+                new TreeItem<>("Search Results");
+
+        for (Notebook notebook : notebookRepository.findAll()) {
+
+            TreeItem<Object> notebookItem =
+                    new TreeItem<>(notebook);
+
+            for (Note note : results) {
+
+                if (note.getNotebookId() == notebook.getId()) {
+                    notebookItem.getChildren()
+                            .add(new TreeItem<>(note));
+                }
+            }
+
+            if (!notebookItem.getChildren().isEmpty()) {
+                notebookItem.setExpanded(true);
+                root.getChildren().add(notebookItem);
+            }
+        }
+
+        programmaticNavigation = true;
+
+        try {
+            libraryTree.setRoot(root);
+        } finally {
+            programmaticNavigation = false;
+        }
+    }
+
+    // =============================================================
     // OPEN GLOBAL SEARCH RESULT
     // =============================================================
 
@@ -1751,6 +2480,11 @@ public class ZorzaNotes extends Application {
         if (searchResult == null) {
             return;
         }
+
+        String searchQuery =
+                globalSearch
+                        .getText()
+                        .trim();
 
         /*
          * Save the currently open note BEFORE beginning the
@@ -1878,26 +2612,192 @@ public class ZorzaNotes extends Application {
              * Clear the search while listeners are suppressed.
              * The normal notebook list is already loaded.
              */
-            globalSearch.clear();
+            suppressSearchRefresh = true;
+
+            try {
+                globalSearch.clear();
+            } finally {
+                suppressSearchRefresh = false;
+            }
 
             notesTitle.setText(
                     "NOTES"
             );
 
-            status.setText(
-                    "Loaded"
-            );
+            int noteMatches =
+                    editor.showSearchMatches(
+                            searchQuery
+                    );
+
+            if (noteMatches > 0) {
+                status.setText(
+                        noteMatches +
+                                " match" +
+                                (noteMatches == 1 ? "" : "es") +
+                                " in this note"
+                );
+            } else if (titleContainsSearch(
+                    targetNote.getTitle(),
+                    searchQuery)) {
+
+                selectTitleSearchMatch(
+                        noteTitle,
+                        searchQuery
+                );
+
+                status.setText(
+                        "Match found in note title"
+                );
+            } else {
+                status.setText(
+                        "Loaded"
+                );
+            }
 
         } finally {
 
             programmaticNavigation =
                     false;
         }
+    }
 
-        /*
-         * Give focus directly to the note body.
-         */
-        editor.requestEditorFocus();
+    // =============================================================
+    // SEARCH MATCH COUNTING
+    // =============================================================
+
+    private int countSearchMatches(
+            List<Note> notes,
+            String query) {
+
+        int count = 0;
+
+        for (Note note : notes) {
+            count += countSearchMatchesInText(
+                    note.getTitle(),
+                    query
+            );
+
+            count += countSearchMatchesInText(
+                    note.getBody(),
+                    query
+            );
+        }
+
+        return count;
+    }
+
+    private int countSearchMatchesInText(
+            String text,
+            String query) {
+
+        if (text == null ||
+                text.isBlank() ||
+                query == null ||
+                query.isBlank()) {
+            return 0;
+        }
+
+        String cleaned =
+                query.trim()
+                        .replaceAll(
+                                "[^\\p{L}\\p{N}_]+",
+                                " "
+                        );
+
+        if (cleaned.isBlank()) {
+            return 0;
+        }
+
+        int count = 0;
+        Set<String> uniqueRanges =
+                new LinkedHashSet<>();
+
+        for (String term : cleaned.split("\\s+")) {
+
+            if (term.isBlank()) {
+                continue;
+            }
+
+            Pattern pattern =
+                    Pattern.compile(
+                            "(?iu)(?<![\\p{L}\\p{N}_])" +
+                                    Pattern.quote(term) +
+                                    "[\\p{L}\\p{N}_]*"
+                    );
+
+            Matcher matcher =
+                    pattern.matcher(text);
+
+            while (matcher.find()) {
+
+                String range =
+                        matcher.start() +
+                                ":" +
+                                matcher.end();
+
+                if (uniqueRanges.add(range)) {
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    private boolean titleContainsSearch(
+            String title,
+            String query) {
+
+        return countSearchMatchesInText(
+                title,
+                query
+        ) > 0;
+    }
+
+    private void selectTitleSearchMatch(
+            TextField noteTitle,
+            String query) {
+
+        String title =
+                noteTitle.getText();
+
+        if (title == null ||
+                query == null) {
+            return;
+        }
+
+        String cleaned =
+                query.trim()
+                        .replaceAll(
+                                "[^\\p{L}\\p{N}_]+",
+                                " "
+                        );
+
+        for (String term : cleaned.split("\\s+")) {
+
+            if (term.isBlank()) {
+                continue;
+            }
+
+            Pattern pattern =
+                    Pattern.compile(
+                            "(?iu)(?<![\\p{L}\\p{N}_])" +
+                                    Pattern.quote(term) +
+                                    "[\\p{L}\\p{N}_]*"
+                    );
+
+            Matcher matcher =
+                    pattern.matcher(title);
+
+            if (matcher.find()) {
+                noteTitle.requestFocus();
+                noteTitle.selectRange(
+                        matcher.start(),
+                        matcher.end()
+                );
+                return;
+            }
+        }
     }
 
     // =============================================================
@@ -2044,6 +2944,8 @@ public class ZorzaNotes extends Application {
                 true;
 
         try {
+
+            editor.clearSearchMatches();
 
             currentNote =
                     note;
