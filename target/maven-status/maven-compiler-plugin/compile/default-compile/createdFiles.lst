@@ -1,5 +1,7 @@
+org/zorzanotes/UrlShortener.class
 org/zorzanotes/AppSettings.class
 org/zorzanotes/ZorzaNotes$2.class
+org/zorzanotes/PlainTextEditor.class
 org/zorzanotes/ZorzaLauncher.class
 org/zorzanotes/ThemeManager.class
 org/zorzanotes/ZorzaNotes$1.class
@@ -13,5 +15,5 @@ org/zorzanotes/NotebookRepository.class
 org/zorzanotes/Notebook.class
 org/zorzanotes/AppSettings$TextSize.class
 org/zorzanotes/Database.class
-org/zorzanotes/ThemeManager$1.class
+org/zorzanotes/ZorzaNotes$3.class
 org/zorzanotes/ZorzaNotes.class

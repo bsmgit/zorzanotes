@@ -225,10 +225,7 @@ public final class Database {
             /*
              * Keep the FTS index synchronized.
              */
-            statement.execute("""
-                INSERT INTO notes_fts(notes_fts)
-                VALUES ('rebuild')
-                """);
+            // FTS is maintained by triggers; do not rebuild at every startup.
         }
     }
 

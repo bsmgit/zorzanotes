@@ -71,3 +71,10 @@
     -fx-font-size: 24px;
     -fx-font-weight: bold;
 }
+/* Zorza 2.0 notebook tabs and responsive navigation */
+.tab-pane { -fx-tab-min-height: 34px; }
+.tab-pane .tab { -fx-padding: 7px 18px; -fx-background-radius: 7px 7px 0 0; }
+.tab-pane .tab:selected { -fx-font-weight: bold; }
+.note-title { -fx-font-size: 22px; -fx-font-weight: bold; -fx-padding: 8px; }
+.list-view { -fx-background-insets: 0; -fx-background-radius: 6px; }
+.text-area { -fx-background-insets: 0; }
