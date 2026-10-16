@@ -1,0 +1,22 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] ---------------------< org.zorzanotes:zorza-notes >---------------------
+[INFO] Building zorza-notes 2.1.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.2.0:clean (default-clean) @ zorza-notes ---
+[INFO] Deleting /Users/ben/Library/Mobile Documents/com~apple~CloudDocs/code/zorzanotes/target
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  1.178 s
+[INFO] Finished at: 2026-10-16T12:09:23-04:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-clean-plugin:3.2.0:clean (default-clean) on project zorza-notes: Failed to clean project: Failed to delete /Users/ben/Library/Mobile Documents/com~apple~CloudDocs/code/zorzanotes/target/package/wellbehavedfx-0.3.3.jar -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoExecutionException

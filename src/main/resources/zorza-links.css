@@ -1,0 +1,41 @@
+
+/* Zorza Notes - RichTextFX editor */
+
+/* Default light mode */
+.code-area {
+    -fx-background-color: #ffffff;
+}
+
+.code-area .text {
+    -fx-fill: #202020;
+}
+
+/* Dark mode */
+.root.zorza-dark .code-area {
+    -fx-background-color: #252525;
+}
+
+.root.zorza-dark .code-area .text {
+    -fx-fill: #eeeeee;
+}
+
+/* URLs in both themes */
+.code-area .text.url-link {
+    -fx-fill: #1684e8;
+    -fx-underline: true;
+}
+
+/* Brighter links in dark mode */
+.root.zorza-dark .code-area .text.url-link {
+    -fx-fill: #64b5ff;
+}
+
+/* Text selection */
+.root.zorza-dark .code-area .selection {
+    -fx-fill: #355d85;
+}
+
+/* Caret */
+.root.zorza-dark .code-area .caret {
+    -fx-stroke: #ffffff;
+}

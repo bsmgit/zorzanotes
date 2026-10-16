@@ -1,2839 +1,785 @@
+
 package org.zorzanotes;
 
 import javafx.animation.PauseTransition;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
-import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
-import javafx.scene.input.KeyCode;
-import javafx.scene.input.Dragboard;
-import javafx.scene.input.TransferMode;
-import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.*;
 import javafx.scene.text.Font;
-import javafx.scene.text.FontWeight;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
-import javafx.stage.StageStyle;
 import javafx.util.Duration;
 
 import java.io.File;
-import java.io.IOException;
-import java.sql.SQLException;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Optional;
-import java.util.LinkedHashSet;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.nio.file.*;
+import java.sql.Connection;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.prefs.Preferences;
 
 public class ZorzaNotes extends Application {
 
     public static final String APP_NAME = "Zorza Notes";
-    public static final String APP_VERSION = "1.2.0";
+    public static final String APP_VERSION = "2.0.8";
     public static final String APP_URL = "https://zorzanotes.com";
-    public static final String APP_TAGLINE = "Your thoughts belong to you.";
-    public static final String APP_LICENSE = "MIT License";
 
-    private final NotebookRepository notebookRepository =
+    private static final String LAST_NOTEBOOK =
+            "lastSelectedNotebookId";
+
+    private final Preferences preferences =
+            Preferences.userNodeForPackage(ZorzaNotes.class);
+
+    private final NotebookRepository books =
             new NotebookRepository();
 
-    private final NoteRepository noteRepository =
+    private final NoteRepository notes =
             new NoteRepository();
 
-    private final ExportImportService exportImportService =
-            new ExportImportService(
-                    notebookRepository,
-                    noteRepository
-            );
+    private final ExportImportService importExport =
+            new ExportImportService(books, notes);
 
-    private Note currentNote;
+    private final ExecutorService io =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread thread = new Thread(r, "zorza-database");
+                thread.setDaemon(true);
+                return thread;
+            });
 
-    private final PauseTransition autoSaveTimer =
-            new PauseTransition(
-                    Duration.millis(700)
-            );
+    private final PauseTransition saveDelay =
+            new PauseTransition(Duration.millis(650));
 
-    private final PauseTransition searchTimer =
-            new PauseTransition(
-                    Duration.millis(200)
-            );
+    private final PauseTransition searchDelay =
+            new PauseTransition(Duration.millis(250));
 
-    private boolean loadingNote = false;
+    private final ComboBox<Notebook> notebookSelector =
+            new ComboBox<>();
 
-    /*
-     * When true, notebook/note selection listeners do nothing.
-     *
-     * This lets global search navigation change both selections
-     * atomically without temporarily clearing the editor.
-     */
-    private boolean programmaticNavigation = false;
+    private final ListView<Note> noteList =
+            new ListView<>();
 
-    /*
-     * Prevents programmatic changes to the global search field
-     * from starting a new search after a result is opened.
-     */
-    private boolean suppressSearchRefresh = false;
+    private final ListView<Note> results =
+            new ListView<>();
+
+    private final TextField title = new TextField();
+    private final TextField search = new TextField();
+    private final Label status = new Label("Ready");
+
+    private PlainTextEditor editor;
+    private Stage mainStage;
+    private Note current;
+
+    private boolean loading;
+    private boolean navigating;
+
+    private long editRevision;
+    private long searchRevision;
+    private long queuedRevision = -1;
+    private long queuedNoteId = -1;
+
+    private Future<?> pendingSave;
 
     @Override
     public void start(Stage stage) {
 
-        if (!unlockVault(stage)) {
-            VaultService.clearPassword();
+        mainStage = stage;
+
+        if (!unlock()) {
             Platform.exit();
             return;
         }
 
         try {
             Database.initialize();
-        } catch (SQLException exception) {
-            VaultService.clearPassword();
-            showError(stage, "Unable to Open Zorza Vault", exception);
+        } catch (Exception ex) {
+            error("Vault initialization failed", ex);
             Platform.exit();
             return;
         }
 
-        // =========================================================
-        // NOTEBOOKS
-        // =========================================================
-
-        Label notebooksTitle =
-                new Label("NOTEBOOKS");
-
-        ListView<Notebook> notebooks =
-                new ListView<>();
-
-        notebooks.getItems().addAll(
-                notebookRepository.findAll()
+        editor = new PlainTextEditor(
+                getHostServices(),
+                new UrlShortener()
         );
 
-        Button newNotebook =
-                new Button("+ New Notebook");
+        configureControls();
 
-        Button deleteNotebook =
-                new Button("Delete");
+        Button addNotebook = new Button("+ Notebook");
+        Button deleteNotebook = new Button("Delete Notebook");
+        Button addNote = new Button("+ Note");
 
-        deleteNotebook.setDisable(true);
+        addNotebook.setOnAction(e -> createNotebook());
+        deleteNotebook.setOnAction(e -> deleteNotebook());
+        addNote.setOnAction(e -> createNote());
 
-        HBox notebookButtons =
-                new HBox(
-                        8,
-                        newNotebook,
-                        deleteNotebook
-                );
+        notebookSelector.setMaxWidth(Double.MAX_VALUE);
 
-        VBox notebookPane =
-                new VBox(
-                        10,
-                        notebooksTitle,
-                        notebooks,
-                        notebookButtons
-                );
-
-        notebookPane.setPadding(
-                new Insets(20)
+        HBox notebookBar = new HBox(
+                10,
+                new Label("Notebook:"),
+                notebookSelector,
+                addNotebook,
+                deleteNotebook
         );
 
-        notebookPane.setPrefWidth(220);
+        HBox.setHgrow(notebookSelector, Priority.ALWAYS);
 
-        VBox.setVgrow(
-                notebooks,
-                Priority.ALWAYS
+        VBox sidebar = new VBox(
+                9,
+                addNote,
+                new Label("Notes"),
+                noteList,
+                new Label("Search Results"),
+                results
         );
 
-        // =========================================================
-        // NOTES
-        // =========================================================
+        sidebar.setPadding(new Insets(12));
+        sidebar.setPrefWidth(290);
+        sidebar.setMinWidth(200);
 
-        Label notesTitle =
-                new Label("NOTES");
+        VBox.setVgrow(noteList, Priority.ALWAYS);
+        VBox.setVgrow(results, Priority.ALWAYS);
 
-        ListView<Note> notes =
-                new ListView<>();
-
-        Button newNote =
-                new Button("+ New Note");
-
-        Button deleteNote =
-                new Button("Delete");
-
-        deleteNote.setDisable(true);
-
-        HBox noteButtons =
-                new HBox(
-                        8,
-                        newNote,
-                        deleteNote
-                );
-
-        VBox notesPane =
-                new VBox(
-                        10,
-                        notesTitle,
-                        notes,
-                        noteButtons
-                );
-
-        notesPane.setPadding(
-                new Insets(20)
-        );
-
-        notesPane.setPrefWidth(300);
-
-        VBox.setVgrow(
-                notes,
-                Priority.ALWAYS
-        );
-
-        // =========================================================
-        // LIBRARY TREE
-        // =========================================================
-
-        Label libraryTitle =
-                new Label("LIBRARY");
-
-        TreeView<Object> libraryTree =
-                new TreeView<>();
-
-        libraryTree.setShowRoot(false);
-        libraryTree.setPrefWidth(330);
-
-        HBox libraryButtons =
-                new HBox(
-                        8,
-                        newNotebook,
-                        newNote
-                );
-
-
-        VBox libraryPane =
-                new VBox(
-                        10,
-                        libraryTitle,
-                        libraryTree,
-                        libraryButtons
-                );
-
-        libraryPane.setPadding(
-                new Insets(20)
-        );
-
-        libraryPane.setPrefWidth(330);
-        libraryPane.setMinWidth(260);
-
-        VBox.setVgrow(
-                libraryTree,
-                Priority.ALWAYS
-        );
-
-        rebuildLibraryTree(
-                libraryTree
-        );
-
-        // =========================================================
-        // EDITOR
-        // =========================================================
-
-        TextField noteTitle =
-                new TextField();
-
-        noteTitle.setPromptText(
-                "Note title"
-        );
-
-        noteTitle.getStyleClass()
-                .add("note-title");
-
-        MarkdownEditor editor =
-                new MarkdownEditor();
-
-        editor.setHostServices(
-                getHostServices()
-        );
-
-        Label status =
-                new Label(
-                        "Select a note"
-                );
-
-        VBox editorPane =
-                new VBox(
-                        12,
-                        noteTitle,
-                        editor,
-                        status
-                );
-
-        editorPane.setPadding(
-                new Insets(25)
-        );
-
-        VBox.setVgrow(
+        VBox content = new VBox(
+                10,
+                title,
                 editor,
-                Priority.ALWAYS
+                status
         );
 
-        noteTitle.setDisable(true);
+        content.setPadding(new Insets(15));
+        VBox.setVgrow(editor, Priority.ALWAYS);
 
-        editor.setEditorDisabled(true);
+        SplitPane split = new SplitPane(sidebar, content);
+        split.setDividerPositions(0.27);
 
-        // =========================================================
-        // AUTOSAVE
-        // =========================================================
+        MenuBar menuBar = buildMenu(
+                addNotebook,
+                deleteNotebook,
+                addNote
+        );
 
-        autoSaveTimer.setOnFinished(event -> {
+        // Simplified application header
+        Label heading = new Label("ZORZA NOTES");
+        heading.getStyleClass().add("app-name");
 
-            if (currentNote == null ||
-                    loadingNote ||
-                    programmaticNavigation) {
+        VBox root = new VBox(
+                10,
+                menuBar,
+                heading,
+                notebookBar,
+                search,
+                split
+        );
 
-                return;
+        root.setPadding(new Insets(12));
+        VBox.setVgrow(split, Priority.ALWAYS);
+
+        Scene scene = new Scene(root, 1180, 760);
+
+        stage.setTitle(APP_NAME);
+        stage.setScene(scene);
+
+        applyFontSettings();
+
+        stage.setOnCloseRequest(e -> flushSave());
+
+        stage.show();
+
+        reloadNotebooks(null);
+    }
+
+    private void configureControls() {
+
+        notebookSelector.setCellFactory(v -> notebookCell());
+        notebookSelector.setButtonCell(notebookCell());
+
+        notebookSelector.valueProperty()
+                .addListener((obs, oldBook, book) -> {
+
+                    if (navigating) {
+                        return;
+                    }
+
+                    if (book == null) {
+                        noteList.getItems().clear();
+                        current = null;
+                        clearEditor();
+                        return;
+                    }
+
+                    loadNotebook(book);
+
+                    preferences.putLong(
+                            LAST_NOTEBOOK,
+                            book.getId()
+                    );
+                });
+
+        noteList.setCellFactory(v -> noteCell());
+
+        results.setCellFactory(v -> new ListCell<>() {
+
+            @Override
+            protected void updateItem(Note note, boolean empty) {
+                super.updateItem(note, empty);
+
+                setText(
+                        empty || note == null
+                                ? null
+                                : note.toString()
+                );
             }
-
-            currentNote.setTitle(
-                    cleanTitle(
-                            noteTitle.getText()
-                    )
-            );
-
-            currentNote.setBody(
-                    editor.getText()
-            );
-
-            noteRepository.update(
-                    currentNote
-            );
-
-            notes.refresh();
-            libraryTree.refresh();
-
-            status.setText(
-                    "Saved locally"
-            );
         });
 
-        noteTitle.textProperty()
-                .addListener(
-                        (observable,
-                         oldValue,
-                         newValue) -> {
-
-                            if (loadingNote ||
-                                    programmaticNavigation ||
-                                    currentNote == null) {
-
-                                return;
-                            }
-
-                            /*
-                             * Keep the in-memory note and its TreeView item
-                             * synchronized immediately while the user types.
-                             * The repository write still happens through the
-                             * normal autosave timer below.
-                             */
-                            currentNote.setTitle(
-                                    cleanTitle(newValue)
-                            );
-
-                            updateNoteTitleInTree(
-                                    libraryTree,
-                                    currentNote.getId(),
-                                    currentNote.getTitle()
-                            );
-
-                            notes.refresh();
-
-                            status.setText(
-                                    "Saving..."
-                            );
-
-                            autoSaveTimer
-                                    .playFromStart();
-                        });
-
-        editor.getTextArea()
-                .textProperty()
-                .addListener(
-                        (observable,
-                         oldValue,
-                         newValue) -> {
-
-                            if (loadingNote ||
-                                    programmaticNavigation ||
-                                    currentNote == null) {
-
-                                return;
-                            }
-
-                            status.setText(
-                                    "Saving..."
-                            );
-
-                            autoSaveTimer
-                                    .playFromStart();
-                        });
-
-        // =========================================================
-        // NOTEBOOK SELECTION
-        // =========================================================
-
-        notebooks.getSelectionModel()
+        noteList.getSelectionModel()
                 .selectedItemProperty()
-                .addListener(
-                        (observable,
-                         oldNotebook,
-                         selectedNotebook) -> {
+                .addListener((obs, oldNote, note) -> {
 
-                            if (programmaticNavigation) {
-                                return;
-                            }
-
-                            deleteNotebook.setDisable(
-                                    selectedNotebook == null
-                            );
-
-                            saveImmediately(
-                                    noteTitle,
-                                    editor
-                            );
-
-                            currentNote = null;
-
-                            notes.getSelectionModel()
-                                    .clearSelection();
-
-                            notes.getItems()
-                                    .clear();
-
-                            clearEditor(
-                                    noteTitle,
-                                    editor
-                            );
-
-                            deleteNote.setDisable(
-                                    true
-                            );
-
-                            if (selectedNotebook != null) {
-
-                                notes.getItems()
-                                        .setAll(
-                                                noteRepository
-                                                        .findByNotebook(
-                                                                selectedNotebook
-                                                                        .getId()
-                                                        )
-                                        );
-
-                                status.setText(
-                                        "Notebook selected"
-                                );
-
-                            } else {
-
-                                status.setText(
-                                        "Select a notebook"
-                                );
-                            }
-                        });
-
-        // =========================================================
-        // NOTE SELECTION
-        // =========================================================
-
-        notes.getSelectionModel()
-                .selectedItemProperty()
-                .addListener(
-                        (observable,
-                         oldNote,
-                         selectedNote) -> {
-
-                            if (programmaticNavigation) {
-                                return;
-                            }
-
-                            if (oldNote != null &&
-                                    oldNote == currentNote) {
-
-                                saveImmediately(
-                                        noteTitle,
-                                        editor
-                                );
-                            }
-
-                            loadNote(
-                                    selectedNote,
-                                    noteTitle,
-                                    editor,
-                                    deleteNote,
-                                    status
-                            );
-                        });
-
-        // =========================================================
-        // NEW NOTEBOOK
-        // =========================================================
-
-        newNotebook.setOnAction(event -> {
-
-            TextInputDialog dialog =
-                    new TextInputDialog();
-
-            dialog.initOwner(stage);
-
-            dialog.setTitle(
-                    "New Notebook"
-            );
-
-            dialog.setHeaderText(
-                    "Create a notebook"
-            );
-
-            dialog.setContentText(
-                    "Name:"
-            );
-
-            dialog.showAndWait()
-                    .ifPresent(name -> {
-
-                        String cleanName =
-                                name.trim();
-
-                        if (cleanName.isEmpty()) {
-                            return;
-                        }
-
-                        Notebook notebook =
-                                notebookRepository
-                                        .create(
-                                                cleanName
-                                        );
-
-                        notebooks.getItems()
-                                .add(notebook);
-
-                        notebooks
-                                .getSelectionModel()
-                                .select(notebook);
-
-                        rebuildLibraryTree(libraryTree);
-                    });
-        });
-
-        // =========================================================
-        // DELETE NOTEBOOK
-        // =========================================================
-
-        deleteNotebook.setOnAction(event -> {
-
-            Notebook selectedNotebook =
-                    notebooks
-                            .getSelectionModel()
-                            .getSelectedItem();
-
-            if (selectedNotebook == null) {
-                return;
-            }
-
-            Alert confirmation =
-                    new Alert(
-                            Alert.AlertType.CONFIRMATION
-                    );
-
-            confirmation.initOwner(stage);
-
-            confirmation.setTitle(
-                    "Delete Notebook"
-            );
-
-            confirmation.setHeaderText(
-                    "Delete \"" +
-                            selectedNotebook.getName() +
-                            "\"?"
-            );
-
-            confirmation.setContentText(
-                    "All notes inside this notebook will also be permanently deleted."
-            );
-
-            confirmation.showAndWait()
-                    .ifPresent(result -> {
-
-                        if (result != ButtonType.OK) {
-                            return;
-                        }
-
-                        autoSaveTimer.stop();
-
-                        currentNote = null;
-
-                        notebookRepository.delete(
-                                selectedNotebook
-                        );
-
-                        notebooks.getItems()
-                                .remove(
-                                        selectedNotebook
-                                );
-
-                        notes.getItems()
-                                .clear();
-
-                        clearEditor(
-                                noteTitle,
-                                editor
-                        );
-
-                        deleteNote.setDisable(
-                                true
-                        );
-
-                        deleteNotebook.setDisable(
-                                true
-                        );
-
-                        status.setText(
-                                "Notebook deleted"
-                        );
-
-                        rebuildLibraryTree(libraryTree);
-                    });
-        });
-
-        // =========================================================
-        // NEW NOTE
-        // =========================================================
-
-        newNote.setOnAction(event -> {
-
-            Notebook selectedNotebook =
-                    notebooks
-                            .getSelectionModel()
-                            .getSelectedItem();
-
-            if (selectedNotebook == null) {
-
-                status.setText(
-                        "Select a notebook first"
-                );
-
-                return;
-            }
-
-            saveImmediately(
-                    noteTitle,
-                    editor
-            );
-
-            Note note =
-                    noteRepository.create(
-                            selectedNotebook
-                                    .getId()
-                    );
-
-            notes.getItems()
-                    .add(
-                            0,
-                            note
-                    );
-
-            notes.getSelectionModel()
-                    .select(note);
-
-            noteTitle.requestFocus();
-
-            noteTitle.selectAll();
-
-            rebuildLibraryTree(libraryTree);
-        });
-
-        // =========================================================
-        // DELETE NOTE
-        // =========================================================
-
-        deleteNote.setOnAction(event -> {
-
-            Note selectedNote =
-                    notes
-                            .getSelectionModel()
-                            .getSelectedItem();
-
-            if (selectedNote == null) {
-                return;
-            }
-
-            Alert confirmation =
-                    new Alert(
-                            Alert.AlertType.CONFIRMATION
-                    );
-
-            confirmation.initOwner(stage);
-
-            confirmation.setTitle(
-                    "Delete Note"
-            );
-
-            confirmation.setHeaderText(
-                    "Delete \"" +
-                            selectedNote.getTitle() +
-                            "\"?"
-            );
-
-            confirmation.setContentText(
-                    "This note will be permanently deleted."
-            );
-
-            confirmation.showAndWait()
-                    .ifPresent(result -> {
-
-                        if (result != ButtonType.OK) {
-                            return;
-                        }
-
-                        autoSaveTimer.stop();
-
-                        currentNote = null;
-
-                        noteRepository.delete(
-                                selectedNote
-                        );
-
-                        notes.getItems()
-                                .remove(
-                                        selectedNote
-                                );
-
-                        clearEditor(
-                                noteTitle,
-                                editor
-                        );
-
-                        deleteNote.setDisable(
-                                true
-                        );
-
-                        status.setText(
-                                "Note deleted"
-                        );
-
-                        rebuildLibraryTree(libraryTree);
-                    });
-        });
-
-        // =========================================================
-        // EDITOR DELETE NOTE BUTTON
-        // =========================================================
-
-        editor.setOnDeleteNote(
-                deleteNote::fire
-        );
-
-        // =========================================================
-        // RIGHT-CLICK MENUS + DRAG/DROP NOTE MOVING
-        // =========================================================
-
-        libraryTree.setCellFactory(tree ->
-                new TreeCell<>() {
-
-                    @Override
-                    protected void updateItem(
-                            Object item,
-                            boolean empty) {
-
-                        super.updateItem(item, empty);
-
-                        setContextMenu(null);
-                        setOnDragDetected(null);
-                        setOnDragOver(null);
-                        setOnDragDropped(null);
-                        setOnDragDone(null);
-
-                        if (empty || item == null) {
-                            setText(null);
-                            return;
-                        }
-
-                        setText(item.toString());
-
-                        if (item instanceof Note note) {
-
-                            // -------------------------------------------------
-                            // RIGHT CLICK: MOVE NOTE
-                            // -------------------------------------------------
-
-                            Menu moveMenu =
-                                    new Menu("Move to Notebook");
-
-                            for (Notebook targetNotebook : notebookRepository.findAll()) {
-
-                                if (targetNotebook.getId() == note.getNotebookId()) {
-                                    continue;
-                                }
-
-                                MenuItem targetItem =
-                                        new MenuItem(targetNotebook.getName());
-
-                                targetItem.setOnAction(event -> {
-
-                                    libraryTree.getSelectionModel()
-                                            .select(getTreeItem());
-
-                                    moveNoteToNotebook(
-                                            note,
-                                            targetNotebook,
-                                            libraryTree,
-                                            notebooks,
-                                            notes,
-                                            noteTitle,
-                                            editor,
-                                            deleteNote,
-                                            status
-                                    );
-                                });
-
-                                moveMenu.getItems().add(targetItem);
-                            }
-
-                            if (moveMenu.getItems().isEmpty()) {
-                                MenuItem nowhere =
-                                        new MenuItem("No other notebooks");
-                                nowhere.setDisable(true);
-                                moveMenu.getItems().add(nowhere);
-                            }
-
-                            // -------------------------------------------------
-                            // RIGHT CLICK: DELETE NOTE
-                            // -------------------------------------------------
-
-                            MenuItem deleteNoteItem =
-                                    new MenuItem("Delete Note...");
-
-                            deleteNoteItem.setOnAction(event -> {
-
-                                libraryTree.getSelectionModel()
-                                        .select(getTreeItem());
-
-                                Alert confirmation =
-                                        new Alert(Alert.AlertType.CONFIRMATION);
-
-                                confirmation.initOwner(stage);
-                                confirmation.setTitle("Delete Note");
-                                confirmation.setHeaderText(
-                                        "Delete \"" + note.getTitle() + "\"?"
-                                );
-                                confirmation.setContentText(
-                                        "This note will be permanently deleted."
-                                );
-
-                                confirmation.showAndWait()
-                                        .ifPresent(result -> {
-
-                                            if (result != ButtonType.OK) {
-                                                return;
-                                            }
-
-                                            autoSaveTimer.stop();
-
-                                            if (currentNote != null &&
-                                                    currentNote.getId() == note.getId()) {
-
-                                                currentNote = null;
-                                                clearEditor(noteTitle, editor);
-                                                deleteNote.setDisable(true);
-                                            }
-
-                                            noteRepository.delete(note);
-
-                                            notes.getItems()
-                                                    .removeIf(existing ->
-                                                            existing.getId() == note.getId());
-
-                                            status.setText("Note deleted");
-                                            rebuildLibraryTree(libraryTree);
-                                        });
-                            });
-
-                            setContextMenu(
-                                    new ContextMenu(
-                                            moveMenu,
-                                            new SeparatorMenuItem(),
-                                            deleteNoteItem
-                                    )
-                            );
-
-                            // -------------------------------------------------
-                            // DRAG NOTE
-                            // -------------------------------------------------
-
-                            setOnDragDetected(event -> {
-
-                                Dragboard dragboard =
-                                        startDragAndDrop(TransferMode.MOVE);
-
-                                ClipboardContent content =
-                                        new ClipboardContent();
-
-                                content.putString(
-                                        "zorza-note:" + note.getId()
-                                );
-
-                                dragboard.setContent(content);
-                                event.consume();
-                            });
-
-                        } else if (item instanceof Notebook notebook) {
-
-                            // -------------------------------------------------
-                            // RIGHT CLICK: DELETE NOTEBOOK
-                            // -------------------------------------------------
-
-                            MenuItem deleteNotebookItem =
-                                    new MenuItem("Delete Notebook...");
-
-                            deleteNotebookItem.setOnAction(event -> {
-
-                                libraryTree.getSelectionModel()
-                                        .select(getTreeItem());
-
-                                Alert confirmation =
-                                        new Alert(Alert.AlertType.CONFIRMATION);
-
-                                confirmation.initOwner(stage);
-                                confirmation.setTitle("Delete Notebook");
-                                confirmation.setHeaderText(
-                                        "Delete \"" + notebook.getName() + "\"?"
-                                );
-                                confirmation.setContentText(
-                                        "All notes inside this notebook will also be permanently deleted."
-                                );
-
-                                confirmation.showAndWait()
-                                        .ifPresent(result -> {
-
-                                            if (result != ButtonType.OK) {
-                                                return;
-                                            }
-
-                                            autoSaveTimer.stop();
-
-                                            if (currentNote != null &&
-                                                    currentNote.getNotebookId() == notebook.getId()) {
-
-                                                currentNote = null;
-                                                clearEditor(noteTitle, editor);
-                                                deleteNote.setDisable(true);
-                                            }
-
-                                            notebookRepository.delete(notebook);
-
-                                            notebooks.getItems()
-                                                    .removeIf(existing ->
-                                                            existing.getId() == notebook.getId());
-
-                                            Notebook selectedNotebook =
-                                                    notebooks.getSelectionModel()
-                                                            .getSelectedItem();
-
-                                            if (selectedNotebook != null &&
-                                                    selectedNotebook.getId() == notebook.getId()) {
-
-                                                notebooks.getSelectionModel()
-                                                        .clearSelection();
-                                            }
-
-                                            notes.getItems().clear();
-                                            deleteNotebook.setDisable(true);
-                                            status.setText("Notebook deleted");
-                                            rebuildLibraryTree(libraryTree);
-                                        });
-                            });
-
-                            setContextMenu(
-                                    new ContextMenu(deleteNotebookItem)
-                            );
-
-                            // -------------------------------------------------
-                            // DROP NOTE ON NOTEBOOK
-                            // -------------------------------------------------
-
-                            setOnDragOver(event -> {
-
-                                Dragboard dragboard =
-                                        event.getDragboard();
-
-                                if (dragboard.hasString() &&
-                                        dragboard.getString().startsWith("zorza-note:")) {
-
-                                    event.acceptTransferModes(TransferMode.MOVE);
-                                }
-
-                                event.consume();
-                            });
-
-                            setOnDragDropped(event -> {
-
-                                Dragboard dragboard =
-                                        event.getDragboard();
-
-                                boolean completed = false;
-
-                                if (dragboard.hasString() &&
-                                        dragboard.getString().startsWith("zorza-note:")) {
-
-                                    try {
-                                        long noteId =
-                                                Long.parseLong(
-                                                        dragboard.getString()
-                                                                .substring("zorza-note:".length())
-                                                );
-
-                                        Note draggedNote =
-                                                noteRepository.findById(noteId);
-
-                                        if (draggedNote != null) {
-
-                                            if (draggedNote.getNotebookId() == notebook.getId()) {
-                                                completed = true;
-                                            } else {
-                                                moveNoteToNotebook(
-                                                        draggedNote,
-                                                        notebook,
-                                                        libraryTree,
-                                                        notebooks,
-                                                        notes,
-                                                        noteTitle,
-                                                        editor,
-                                                        deleteNote,
-                                                        status
-                                                );
-                                                completed = true;
-                                            }
-                                        }
-
-                                    } catch (NumberFormatException ignored) {
-                                        completed = false;
-                                    }
-                                }
-
-                                event.setDropCompleted(completed);
-                                event.consume();
-                            });
-                        }
-                    }
-                }
-        );
-
-        // =========================================================
-        // GLOBAL SEARCH
-        // =========================================================
-
-        TextField globalSearch =
-                new TextField();
-
-        globalSearch.setPromptText(
-                "Search all notes..."
-        );
-
-        globalSearch.setPrefWidth(
-                330
-        );
-
-        searchTimer.setOnFinished(event -> {
-
-            String query =
-                    globalSearch
-                            .getText()
-                            .trim();
-
-            if (query.isEmpty()) {
-
-                editor.clearSearchMatches();
-                rebuildLibraryTree(libraryTree);
-
-                restoreSelectedNotebookNotes(
-                        notebooks,
-                        notes,
-                        notesTitle
-                );
-
-                return;
-            }
-
-            /*
-             * Make sure the FTS5 index contains anything
-             * the user has just typed into the current note.
-             */
-            saveImmediately(
-                    noteTitle,
-                    editor
-            );
-
-            try {
-
-                List<Note> results =
-                        noteRepository
-                                .searchAll(query);
-
-                /*
-                 * Changing the ListView contents can change its
-                 * selection. Suppress the normal note listener
-                 * while we display temporary search results.
-                 */
-                programmaticNavigation = true;
-
-                try {
-
-                    notes.getSelectionModel()
-                            .clearSelection();
-
-                    notes.getItems()
-                            .setAll(results);
-
-                } finally {
-
-                    programmaticNavigation = false;
-                }
-
-                int totalMatches =
-                        countSearchMatches(
-                                results,
-                                query
-                        );
-
-                rebuildSearchTree(
-                        libraryTree,
-                        results,
-                        query
-                );
-
-                notesTitle.setText(
-                        "SEARCH RESULTS (" +
-                                results.size() +
-                                " NOTES · " +
-                                totalMatches +
-                                " MATCHES)"
-                );
-
-                status.setText(
-                        results.size() +
-                                " note" +
-                                (results.size() == 1 ? "" : "s") +
-                                " · " +
-                                totalMatches +
-                                " match" +
-                                (totalMatches == 1 ? "" : "es")
-                );
-
-            } catch (RuntimeException e) {
-
-                status.setText(
-                        "Search failed"
-                );
-
-                showError(
-                        stage,
-                        "Search Failed",
-                        e
-                );
-            }
-        });
-
-        globalSearch.textProperty()
-                .addListener(
-                        (observable,
-                         oldValue,
-                         newValue) -> {
-
-                            if (suppressSearchRefresh) {
-                                return;
-                            }
-
-                            searchTimer
-                                    .playFromStart();
-                        }
-                );
-
-        // =========================================================
-        // LIBRARY TREE SELECTION
-        // =========================================================
-
-        libraryTree.getSelectionModel()
-                .selectedItemProperty()
-                .addListener((observable, oldItem, selectedItem) -> {
-
-                    if (programmaticNavigation || selectedItem == null) {
-                        return;
-                    }
-
-                    Object value = selectedItem.getValue();
-
-                    if (value instanceof Notebook selectedNotebook) {
-
-                        notebooks.getSelectionModel()
-                                .select(selectedNotebook);
-
-                        return;
-                    }
-
-                    if (!(value instanceof Note selectedNote)) {
-                        return;
-                    }
-
-                    if (!globalSearch.getText().isBlank()) {
-
-                        openSearchResult(
-                                selectedNote,
-                                notebooks,
-                                notes,
-                                noteTitle,
-                                editor,
-                                deleteNote,
-                                deleteNotebook,
-                                status,
-                                globalSearch,
-                                notesTitle
-                        );
-
-                        rebuildLibraryTree(libraryTree);
-                        return;
-                    }
-
-                    Notebook parentNotebook =
-                            findNotebook(
-                                    notebooks,
-                                    selectedNote.getNotebookId()
-                            );
-
-                    if (parentNotebook == null) {
-                        refreshNotebooks(notebooks);
-                        parentNotebook =
-                                findNotebook(
-                                        notebooks,
-                                        selectedNote.getNotebookId()
-                                );
-                    }
-
-                    if (parentNotebook == null) {
-                        return;
-                    }
-
-                    notebooks.getSelectionModel()
-                            .select(parentNotebook);
-
-                    Note noteToSelect =
-                            findNote(
-                                    notes.getItems(),
-                                    selectedNote.getId()
-                            );
-
-                    if (noteToSelect != null) {
-                        notes.getSelectionModel()
-                                .select(noteToSelect);
+                    if (note != null && !navigating) {
+                        openNote(note);
                     }
                 });
 
-        // =========================================================
-        // OPEN SEARCH RESULT WITH MOUSE
-        // =========================================================
+        results.getSelectionModel()
+                .selectedItemProperty()
+                .addListener((obs, oldNote, note) -> {
 
-        notes.setOnMouseClicked(event -> {
+                    if (note != null) {
+                        openResult(note);
+                    }
+                });
 
-            if (globalSearch
-                    .getText()
-                    .isBlank()) {
+        title.setPromptText("Note title");
+        title.setDisable(true);
 
-                return;
-            }
-
-            Note result =
-                    notes
-                            .getSelectionModel()
-                            .getSelectedItem();
-
-            if (result == null) {
-                return;
-            }
-
-            openSearchResult(
-                    result,
-                    notebooks,
-                    notes,
-                    noteTitle,
-                    editor,
-                    deleteNote,
-                    deleteNotebook,
-                    status,
-                    globalSearch,
-                    notesTitle
-            );
-        });
-
-        // =========================================================
-        // OPEN SEARCH RESULT WITH ENTER
-        // =========================================================
-
-        notes.setOnKeyPressed(event -> {
-
-            if (event.getCode() !=
-                    KeyCode.ENTER) {
-
-                return;
-            }
-
-            if (globalSearch
-                    .getText()
-                    .isBlank()) {
-
-                return;
-            }
-
-            Note result =
-                    notes
-                            .getSelectionModel()
-                            .getSelectedItem();
-
-            if (result == null) {
-                return;
-            }
-
-            openSearchResult(
-                    result,
-                    notebooks,
-                    notes,
-                    noteTitle,
-                    editor,
-                    deleteNote,
-                    deleteNotebook,
-                    status,
-                    globalSearch,
-                    notesTitle
-            );
-
-            event.consume();
-        });
-
-        /*
-         * Pressing Enter while still in the search box opens
-         * the selected result, or the first result if nothing
-         * has been selected yet.
-         */
-        globalSearch.setOnAction(event -> {
-
-            if (notes.getItems()
-                    .isEmpty()) {
-
-                return;
-            }
-
-            Note result =
-                    notes
-                            .getSelectionModel()
-                            .getSelectedItem();
-
-            if (result == null) {
-
-                result =
-                        notes.getItems()
-                                .getFirst();
-            }
-
-            openSearchResult(
-                    result,
-                    notebooks,
-                    notes,
-                    noteTitle,
-                    editor,
-                    deleteNote,
-                    deleteNotebook,
-                    status,
-                    globalSearch,
-                    notesTitle
-            );
-        });
-
-        // =========================================================
-        // FILE MENU
-        // =========================================================
-
-        Menu fileMenu =
-                new Menu("File");
-
-        MenuItem exportAll =
-                new MenuItem(
-                        "Export All to Markdown..."
+        title.textProperty()
+                .addListener((obs, oldValue, newValue) ->
+                        markDirty()
                 );
 
-        MenuItem importMarkdown =
-                new MenuItem(
-                        "Import Markdown..."
+        editor.area().textProperty()
+                .addListener((obs, oldValue, newValue) ->
+                        markDirty()
                 );
 
-        MenuItem quit =
-                new MenuItem("Quit");
+        saveDelay.setOnFinished(e -> save());
 
-        fileMenu.getItems()
-                .addAll(
-                        exportAll,
-                        importMarkdown,
-                        new SeparatorMenuItem(),
-                        quit
-                );
+        search.setPromptText("Search all notebooks");
 
-        // =========================================================
-        // SETTINGS MENU
-        // =========================================================
+        search.textProperty()
+                .addListener((obs, oldValue, newValue) -> {
+                    searchRevision++;
+                    searchDelay.playFromStart();
+                });
 
-        Menu settingsMenu =
-                new Menu("Settings");
-
-        CheckMenuItem darkMode =
-                new CheckMenuItem(
-                        "Dark Mode"
-                );
-
-        darkMode.setSelected(
-                AppSettings.isDarkMode()
-        );
-
-        Menu textSizeMenu =
-                new Menu(
-                        "Application Text Size"
-                );
-
-        RadioMenuItem normalText =
-                new RadioMenuItem(
-                        "Normal"
-                );
-
-        RadioMenuItem largeText =
-                new RadioMenuItem(
-                        "Large"
-                );
-
-        RadioMenuItem extraLargeText =
-                new RadioMenuItem(
-                        "Extra Large"
-                );
-
-        ToggleGroup textSizeGroup =
-                new ToggleGroup();
-
-        normalText.setToggleGroup(
-                textSizeGroup
-        );
-
-        largeText.setToggleGroup(
-                textSizeGroup
-        );
-
-        extraLargeText.setToggleGroup(
-                textSizeGroup
-        );
-
-        switch (AppSettings.getTextSize()) {
-
-            case NORMAL ->
-                    normalText.setSelected(
-                            true
-                    );
-
-            case LARGE ->
-                    largeText.setSelected(
-                            true
-                    );
-
-            case EXTRA_LARGE ->
-                    extraLargeText.setSelected(
-                            true
-                    );
-        }
-
-        textSizeMenu.getItems()
-                .addAll(
-                        normalText,
-                        largeText,
-                        extraLargeText
-                );
-
-        settingsMenu.getItems()
-                .addAll(
-                        darkMode,
-                        new SeparatorMenuItem(),
-                        textSizeMenu
-                );
-
-        // =========================================================
-        // HELP MENU
-        // =========================================================
-
-        Menu helpMenu =
-                new Menu("Help");
-
-        MenuItem about =
-                new MenuItem(
-                        "About Zorza Notes"
-                );
-
-        helpMenu.getItems()
-                .add(
-                        about
-                );
-
-        // =========================================================
-        // MENU BAR
-        // =========================================================
-
-        MenuBar menuBar =
-                new MenuBar(
-                        fileMenu,
-                        settingsMenu,
-                        helpMenu
-                );
-
-        /*
-         * On macOS this moves the JavaFX menu into the normal
-         * system menu bar at the top of the screen.
-         *
-         * Windows and Linux ignore this and display the menu
-         * inside the application window.
-         */
-        menuBar.setUseSystemMenuBar(true);
-
-        // =========================================================
-        // ABOUT
-        // =========================================================
-
-        about.setOnAction(event ->
-                showAboutWindow(
-                        stage
+        searchDelay.setOnFinished(e ->
+                runSearch(
+                        search.getText(),
+                        searchRevision
                 )
         );
-
-        // =========================================================
-        // EXPORT
-        // =========================================================
-
-        exportAll.setOnAction(event -> {
-
-            saveImmediately(
-                    noteTitle,
-                    editor
-            );
-
-            DirectoryChooser chooser =
-                    new DirectoryChooser();
-
-            chooser.setTitle(
-                    "Export Zorza Notes"
-            );
-
-            File destination =
-                    chooser.showDialog(stage);
-
-            if (destination == null) {
-                return;
-            }
-
-            try {
-
-                int count =
-                        exportImportService
-                                .exportAll(
-                                        destination
-                                                .toPath()
-                                );
-
-                status.setText(
-                        "Exported " +
-                                count +
-                                " notes"
-                );
-
-                Alert complete =
-                        new Alert(
-                                Alert.AlertType.INFORMATION
-                        );
-
-                complete.initOwner(stage);
-
-                complete.setTitle(
-                        "Export Complete"
-                );
-
-                complete.setHeaderText(
-                        "Zorza export complete"
-                );
-
-                complete.setContentText(
-                        count +
-                                " notes were exported to:\n\n" +
-                                destination
-                                        .getAbsolutePath()
-                );
-
-                complete.showAndWait();
-
-            } catch (IOException e) {
-
-                showError(
-                        stage,
-                        "Export Failed",
-                        e
-                );
-            }
-        });
-
-        // =========================================================
-        // IMPORT
-        // =========================================================
-
-        importMarkdown.setOnAction(event -> {
-
-            DirectoryChooser chooser =
-                    new DirectoryChooser();
-
-            chooser.setTitle(
-                    "Import Markdown Notebook"
-            );
-
-            File directory =
-                    chooser.showDialog(stage);
-
-            if (directory == null) {
-                return;
-            }
-
-            try {
-
-                int count =
-                        exportImportService
-                                .importDirectory(
-                                        directory
-                                                .toPath()
-                                );
-
-                refreshNotebooks(
-                        notebooks
-                );
-
-                rebuildLibraryTree(
-                        libraryTree
-                );
-
-                status.setText(
-                        "Imported " +
-                                count +
-                                " notes"
-                );
-
-                Alert complete =
-                        new Alert(
-                                Alert.AlertType.INFORMATION
-                        );
-
-                complete.initOwner(stage);
-
-                complete.setTitle(
-                        "Import Complete"
-                );
-
-                complete.setHeaderText(
-                        "Markdown imported"
-                );
-
-                complete.setContentText(
-                        count +
-                                " notes were imported."
-                );
-
-                complete.showAndWait();
-
-            } catch (IOException |
-                     RuntimeException e) {
-
-                showError(
-                        stage,
-                        "Import Failed",
-                        e
-                );
-            }
-        });
-
-        // =========================================================
-        // QUIT
-        // =========================================================
-
-        quit.setOnAction(event -> {
-
-            saveImmediately(
-                    noteTitle,
-                    editor
-            );
-
-            VaultService.clearPassword();
-            Platform.exit();
-        });
-
-        // =========================================================
-        // BRANDING + SEARCH
-        // =========================================================
-
-        Label appName =
-                new Label(
-                        "ZORZA NOTES"
-                );
-
-        appName.getStyleClass()
-                .add(
-                        "app-name"
-                );
-
-        Label tagline =
-                new Label(
-                        APP_TAGLINE
-                );
-
-        VBox branding =
-                new VBox(
-                        2,
-                        appName,
-                        tagline
-                );
-
-        Region headerSpacer =
-                new Region();
-
-        HBox.setHgrow(
-                headerSpacer,
-                Priority.ALWAYS
-        );
-
-        Label searchIcon =
-                new Label("⌕");
-
-        HBox searchBox =
-                new HBox(
-                        7,
-                        searchIcon,
-                        globalSearch
-                );
-
-        searchBox.setAlignment(
-                Pos.CENTER_RIGHT
-        );
-
-        HBox header =
-                new HBox(
-                        20,
-                        branding,
-                        headerSpacer,
-                        searchBox
-                );
-
-        header.setAlignment(
-                Pos.CENTER_LEFT
-        );
-
-        header.setPadding(
-                new Insets(
-                        12,
-                        20,
-                        12,
-                        20
-                )
-        );
-
-        VBox top =
-                new VBox(
-                        menuBar,
-                        header
-                );
-
-        // =========================================================
-        // SPLIT PANE
-        // =========================================================
-
-        SplitPane splitPane =
-                new SplitPane(
-                        libraryPane,
-                        editorPane
-                );
-
-        splitPane.setDividerPositions(
-                0.26
-        );
-
-        BorderPane root =
-                new BorderPane();
-
-        root.setTop(top);
-
-        root.setCenter(
-                splitPane
-        );
-
-        Scene scene =
-                new Scene(
-                        root,
-                        1250,
-                        780
-                );
-
-        // =========================================================
-        // THEME
-        // =========================================================
-
-        ThemeManager.apply(
-                scene
-        );
-
-        darkMode.setOnAction(event -> {
-
-            AppSettings.setDarkMode(
-                    darkMode.isSelected()
-            );
-
-            ThemeManager.apply(
-                    scene
-            );
-        });
-
-        normalText.setOnAction(event -> {
-
-            AppSettings.setTextSize(
-                    AppSettings.TextSize.NORMAL
-            );
-
-            ThemeManager.apply(
-                    scene
-            );
-        });
-
-        largeText.setOnAction(event -> {
-
-            AppSettings.setTextSize(
-                    AppSettings.TextSize.LARGE
-            );
-
-            ThemeManager.apply(
-                    scene
-            );
-        });
-
-        extraLargeText.setOnAction(event -> {
-
-            AppSettings.setTextSize(
-                    AppSettings.TextSize.EXTRA_LARGE
-            );
-
-            ThemeManager.apply(
-                    scene
-            );
-        });
-
-        // =========================================================
-        // STAGE
-        // =========================================================
-
-        stage.setTitle(
-                APP_NAME
-        );
-
-        stage.setMinWidth(
-                950
-        );
-
-        stage.setMinHeight(
-                600
-        );
-
-        stage.setScene(
-                scene
-        );
-
-        stage.setOnCloseRequest(event -> {
-
-            saveImmediately(
-                    noteTitle,
-                    editor
-            );
-
-            VaultService.clearPassword();
-        });
-
-        stage.show();
     }
 
-    // =============================================================
-    // VAULT STARTUP
-    // =============================================================
+    private ListCell<Notebook> notebookCell() {
 
-    private boolean unlockVault(Stage owner) {
-        if (Database.databaseIsPlaintext()) {
-            return createVaultPassword(owner, true);
-        }
+        return new ListCell<>() {
 
-        if (!Database.databaseExists()) {
-            return createVaultPassword(owner, false);
-        }
+            @Override
+            protected void updateItem(
+                    Notebook book,
+                    boolean empty) {
 
-        return requestVaultPassword(owner);
+                super.updateItem(book, empty);
+
+                setText(
+                        empty || book == null
+                                ? null
+                                : book.getName()
+                );
+            }
+        };
     }
 
-    private boolean createVaultPassword(Stage owner, boolean migration) {
+    private boolean unlock() {
+
+        boolean newVault =
+                !Database.databaseExists()
+                        || Database.databaseIsPlaintext();
+
         while (true) {
+
             Dialog<char[]> dialog = new Dialog<>();
-            dialog.setTitle("Create Zorza Vault");
-            dialog.setHeaderText(
-                    migration
-                            ? "Protect your existing notes with encryption"
-                            : "Create your encrypted Zorza vault"
-            );
 
-            ButtonType createButton = new ButtonType(
-                    "Create Vault",
-                    ButtonBar.ButtonData.OK_DONE
-            );
-
-            dialog.getDialogPane().getButtonTypes().addAll(
-                    createButton,
-                    ButtonType.CANCEL
+            configureDialog(
+                    dialog,
+                    newVault
+                            ? "Create Encrypted Vault"
+                            : "Unlock Encrypted Vault",
+                    430,
+                    newVault ? 250 : 210
             );
 
             PasswordField password = new PasswordField();
-            password.setPromptText("Vault password");
-
             PasswordField confirm = new PasswordField();
-            confirm.setPromptText("Confirm password");
 
-            Label explanation = new Label(
-                    migration
-                            ? "Your existing notes will be copied into a new encrypted database. " +
-                            "A plaintext safety backup will be retained until you delete it manually."
-                            : "Your notes will be encrypted at rest. " +
-                            "You will need this password whenever you open Zorza Notes."
-            );
-            explanation.setWrapText(true);
-
-            Label warning = new Label(
-                    "Important: Zorza does not store your password. " +
-                            "If you forget it, Zorza cannot recover your encrypted notes."
-            );
-            warning.setWrapText(true);
-
-            GridPane grid = new GridPane();
-            grid.setHgap(10);
-            grid.setVgap(10);
-            grid.setPadding(new Insets(10, 0, 10, 0));
-            grid.add(explanation, 0, 0, 2, 1);
-            grid.add(new Label("Password:"), 0, 1);
-            grid.add(password, 1, 1);
-            grid.add(new Label("Confirm:"), 0, 2);
-            grid.add(confirm, 1, 2);
-            grid.add(warning, 0, 3, 2, 1);
-
-            dialog.getDialogPane().setContent(grid);
-            dialog.setResultConverter(button ->
-                    button == createButton
-                            ? password.getText().toCharArray()
-                            : null
-            );
-
-            Platform.runLater(password::requestFocus);
-            Optional<char[]> result = dialog.showAndWait();
-
-            if (result.isEmpty()) {
-                password.clear();
-                confirm.clear();
-                return false;
-            }
-
-            char[] supplied = result.get();
-            char[] confirmation = confirm.getText().toCharArray();
-
-            try {
-                if (supplied.length < 8) {
-                    showVaultMessage(
-                            owner,
-                            "Password Too Short",
-                            "Use at least 8 characters for your Zorza vault password."
-                    );
-                    continue;
-                }
-
-                if (!Arrays.equals(supplied, confirmation)) {
-                    showVaultMessage(
-                            owner,
-                            "Passwords Do Not Match",
-                            "The two vault passwords do not match."
-                    );
-                    continue;
-                }
-
-                VaultService.unlock(supplied);
-                return true;
-
-            } finally {
-                Arrays.fill(supplied, '\0');
-                Arrays.fill(confirmation, '\0');
-                password.clear();
-                confirm.clear();
-            }
-        }
-    }
-
-    private boolean requestVaultPassword(Stage owner) {
-        while (true) {
-            Dialog<char[]> dialog = new Dialog<>();
-            dialog.setTitle("Unlock Zorza Notes");
-            dialog.setHeaderText("Unlock your encrypted Zorza vault");
-
-            ButtonType unlockButton = new ButtonType(
-                    "Unlock",
-                    ButtonBar.ButtonData.OK_DONE
-            );
-
-            dialog.getDialogPane().getButtonTypes().addAll(
-                    unlockButton,
-                    ButtonType.CANCEL
-            );
-
-            PasswordField password = new PasswordField();
             password.setPromptText("Vault password");
 
-            VBox content = new VBox(
-                    10,
-                    new Label("Enter your Zorza vault password."),
+            VBox form = new VBox(
+                    12,
+                    new Label(
+                            newVault
+                                    ? "Choose a password (minimum 8 characters)"
+                                    : "Enter your vault password"
+                    ),
                     password
             );
-            content.setPadding(new Insets(10, 0, 10, 0));
-            dialog.getDialogPane().setContent(content);
+
+            form.setPadding(new Insets(10));
+
+            if (newVault) {
+                confirm.setPromptText("Confirm password");
+                form.getChildren().add(confirm);
+            }
+
+            dialog.getDialogPane().setContent(form);
+
+            ButtonType proceed = new ButtonType(
+                    "Continue",
+                    ButtonBar.ButtonData.OK_DONE
+            );
+
+            dialog.getDialogPane()
+                    .getButtonTypes()
+                    .addAll(proceed, ButtonType.CANCEL);
 
             dialog.setResultConverter(button ->
-                    button == unlockButton
+                    button == proceed
                             ? password.getText().toCharArray()
                             : null
             );
 
-            Platform.runLater(password::requestFocus);
             Optional<char[]> result = dialog.showAndWait();
 
             if (result.isEmpty()) {
-                password.clear();
                 return false;
             }
 
-            char[] supplied = result.get();
+            char[] entered = result.get();
 
             try {
-                if (supplied.length == 0) {
-                    showVaultMessage(
-                            owner,
-                            "Password Required",
-                            "Enter your Zorza vault password."
+
+                if (entered.length == 0) {
+                    throw new IllegalArgumentException(
+                            "Password cannot be empty."
                     );
-                    continue;
                 }
 
-                VaultService.unlock(supplied);
+                if (newVault) {
 
-                try (var connection = Database.connect()) {
-                    VaultService.verifyConnection(connection);
+                    if (entered.length < 8) {
+                        throw new IllegalArgumentException(
+                                "Password must contain at least 8 characters."
+                        );
+                    }
+
+                    char[] confirmation =
+                            confirm.getText().toCharArray();
+
+                    try {
+
+                        if (!Arrays.equals(
+                                entered,
+                                confirmation
+                        )) {
+                            throw new IllegalArgumentException(
+                                    "Passwords do not match."
+                            );
+                        }
+
+                    } finally {
+                        Arrays.fill(confirmation, '\0');
+                    }
+                }
+
+                VaultService.unlock(entered);
+
+                if (!newVault) {
+
+                    try (Connection connection =
+                                 Database.connect()) {
+
+                        VaultService.verifyConnection(connection);
+                    }
                 }
 
                 return true;
 
-            } catch (Exception exception) {
+            } catch (Exception ex) {
+
                 VaultService.clearPassword();
-                showVaultMessage(
-                        owner,
-                        "Unable to Unlock Vault",
-                        "The password was not accepted. Please try again."
-                );
+                error("Vault Password", ex);
 
             } finally {
-                Arrays.fill(supplied, '\0');
+
+                Arrays.fill(entered, '\0');
                 password.clear();
+                confirm.clear();
             }
         }
     }
 
-    private void showVaultMessage(Stage owner, String title, String message) {
-        Alert alert = new Alert(Alert.AlertType.WARNING);
-        alert.initOwner(owner);
-        alert.setTitle(title);
-        alert.setHeaderText(title);
+    private void configureDialog(
+            Dialog<?> dialog,
+            String heading,
+            double width,
+            double height) {
+
+        dialog.setTitle(heading);
+
+        if (mainStage != null
+                && mainStage.getScene() != null) {
+
+            dialog.initOwner(mainStage);
+            dialog.initModality(Modality.WINDOW_MODAL);
+
+        } else {
+
+            dialog.initModality(Modality.APPLICATION_MODAL);
+        }
+
+        DialogPane pane = dialog.getDialogPane();
+
+        pane.setPrefSize(width, height);
+
+        pane.setMinSize(
+                Region.USE_COMPUTED_SIZE,
+                Region.USE_COMPUTED_SIZE
+        );
+
+        pane.setMaxSize(
+                Region.USE_COMPUTED_SIZE,
+                Region.USE_COMPUTED_SIZE
+        );
+
+        dialog.setResizable(false);
+    }
+
+    private void info(String heading, String message) {
+
+        Alert alert = new Alert(
+                Alert.AlertType.INFORMATION
+        );
+
+        configureDialog(alert, heading, 460, 230);
+
+        alert.setHeaderText(heading);
         alert.setContentText(message);
         alert.showAndWait();
     }
 
-    // =============================================================
-    // ABOUT WINDOW
-    // =============================================================
+    private void error(String heading, Exception ex) {
 
-    private void showAboutWindow(
-            Stage owner) {
+        ex.printStackTrace();
 
-        Stage aboutStage =
-                new Stage();
-
-        aboutStage.initOwner(
-                owner
+        Alert alert = new Alert(
+                Alert.AlertType.ERROR
         );
 
-        aboutStage.initModality(
-                Modality.WINDOW_MODAL
+        configureDialog(alert, heading, 480, 250);
+
+        alert.setHeaderText(heading);
+
+        alert.setContentText(
+                ex.getMessage() == null
+                        ? ex.toString()
+                        : ex.getMessage()
         );
 
-        aboutStage.initStyle(
-                StageStyle.UTILITY
-        );
-
-        aboutStage.setTitle(
-                "About Zorza Notes"
-        );
-
-        aboutStage.setResizable(
-                false
-        );
-
-        Label dawnSymbol =
-                new Label("☀");
-
-        dawnSymbol.setFont(
-                Font.font(
-                        54
-                )
-        );
-
-        Label name =
-                new Label(
-                        "ZORZA NOTES"
-                );
-
-        name.setFont(
-                Font.font(
-                        "System",
-                        FontWeight.BOLD,
-                        25
-                )
-        );
-
-        Label tagline =
-                new Label(
-                        APP_TAGLINE
-                );
-
-        Label version =
-                new Label(
-                        "Version " +
-                                APP_VERSION
-                );
-
-        Hyperlink website =
-                new Hyperlink(
-                        "zorzanotes.com"
-                );
-
-        website.setOnAction(event ->
-                getHostServices()
-                        .showDocument(
-                                APP_URL
-                        )
-        );
-
-        Label license =
-                new Label(
-                        "Licensed under the " +
-                                APP_LICENSE
-                );
-
-        Label copyright =
-                new Label(
-                        "Copyright © 2026 Zorza Notes"
-                );
-
-        Separator separator =
-                new Separator();
-
-        Button close =
-                new Button(
-                        "Close"
-                );
-
-        close.setDefaultButton(
-                true
-        );
-
-        close.setOnAction(event ->
-                aboutStage.close()
-        );
-
-        VBox content =
-                new VBox(
-                        10,
-                        dawnSymbol,
-                        name,
-                        tagline,
-                        new Region(),
-                        version,
-                        website,
-                        license,
-                        copyright,
-                        separator,
-                        close
-                );
-
-        content.setAlignment(
-                Pos.CENTER
-        );
-
-        content.setPadding(
-                new Insets(
-                        28,
-                        45,
-                        24,
-                        45
-                )
-        );
-
-        content.setPrefWidth(
-                430
-        );
-
-        Scene aboutScene =
-                new Scene(
-                        content
-                );
-
-        /*
-         * Give the About window the same light/dark and
-         * accessibility settings as the main application.
-         */
-        ThemeManager.apply(
-                aboutScene
-        );
-
-        aboutStage.setScene(
-                aboutScene
-        );
-
-        aboutStage.showAndWait();
+        alert.showAndWait();
     }
 
-    // =============================================================
-    // MOVE NOTE TO NOTEBOOK
-    // =============================================================
+    private void showAbout() {
 
-    private void moveNoteToNotebook(
-            Note note,
-            Notebook targetNotebook,
-            TreeView<Object> libraryTree,
-            ListView<Notebook> notebooks,
-            ListView<Note> notes,
-            TextField noteTitle,
-            MarkdownEditor editor,
-            Button deleteNote,
-            Label status) {
-
-        if (note == null || targetNotebook == null) {
-            return;
-        }
-
-        if (note.getNotebookId() == targetNotebook.getId()) {
-            status.setText("Note is already in that notebook");
-            return;
-        }
-
-        /* Save any unsaved editor changes before changing ownership. */
-        if (currentNote != null && currentNote.getId() == note.getId()) {
-            saveImmediately(noteTitle, editor);
-        }
-
-        noteRepository.moveToNotebook(
-                note.getId(),
-                targetNotebook.getId()
+        Alert dialog = new Alert(
+                Alert.AlertType.INFORMATION
         );
 
-        /*
-         * Note.notebookId is mutable so the currently open note remains
-         * internally consistent after a move.
-         */
-        if (currentNote != null && currentNote.getId() == note.getId()) {
-            currentNote.setNotebookId(targetNotebook.getId());
+        configureDialog(
+                dialog,
+                "About Zorza Notes",
+                430,
+                220
+        );
+
+        dialog.setHeaderText(
+                "Zorza Notes " + APP_VERSION
+        );
+
+        Hyperlink website = new Hyperlink(APP_URL);
+
+        website.setOnAction(e ->
+                getHostServices().showDocument(APP_URL)
+        );
+
+        Label license = new Label(
+                "Zorza Notes is open-source software "
+                        + "licensed under the MIT License."
+        );
+
+        license.setWrapText(true);
+
+        VBox content = new VBox(
+                12,
+                new Label("For more information, visit:"),
+                website,
+                license
+        );
+
+        content.setPadding(new Insets(8));
+
+        dialog.getDialogPane().setContent(content);
+        dialog.showAndWait();
+    }
+
+    private Notebook selectedBook() {
+        return notebookSelector.getValue();
+    }
+
+    private void reloadNotebooks(Long preferredId) {
+
+        flushSave();
+
+        Long targetId = preferredId;
+
+        if (targetId == null) {
+
+            Notebook selected = selectedBook();
+
+            targetId = selected == null
+                    ? preferences.getLong(LAST_NOTEBOOK, -1)
+                    : selected.getId();
         }
 
-        note.setNotebookId(targetNotebook.getId());
-
-        /* Keep the hidden compatibility ListViews synchronized. */
-        refreshNotebooks(notebooks);
-
-        Notebook refreshedTarget =
-                findNotebook(notebooks, targetNotebook.getId());
-
-        List<Note> targetNotes =
-                noteRepository.findByNotebook(targetNotebook.getId());
-
-        Note movedNote =
-                findNote(targetNotes, note.getId());
-
-        programmaticNavigation = true;
+        navigating = true;
 
         try {
-            if (refreshedTarget != null) {
-                notebooks.getSelectionModel().select(refreshedTarget);
-            }
 
-            notes.getItems().setAll(targetNotes);
+            List<Notebook> allBooks = books.findAll();
 
-            if (movedNote != null) {
-                notes.getSelectionModel().select(movedNote);
-            }
-        } finally {
-            programmaticNavigation = false;
-        }
-
-        /*
-         * The hidden ListView selection above is intentionally suppressed,
-         * so its normal selection listener cannot load the moved note.
-         * Load it explicitly here.  Without this, the TreeView can show the
-         * note as selected after a move while the editor remains disabled or
-         * continues showing the previous note.
-         */
-        if (movedNote != null) {
-            loadNote(
-                    movedNote,
-                    noteTitle,
-                    editor,
-                    deleteNote,
-                    status
+            notebookSelector.setItems(
+                    FXCollections.observableArrayList(allBooks)
             );
-        }
 
-        rebuildLibraryTree(libraryTree);
-        selectNoteInTree(libraryTree, note.getId());
+            Notebook chosen = null;
 
-        status.setText(
-                "Moved to " + targetNotebook.getName()
-        );
-    }
+            for (Notebook book : allBooks) {
 
-    private void selectNoteInTree(
-            TreeView<Object> libraryTree,
-            long noteId) {
-
-        TreeItem<Object> root = libraryTree.getRoot();
-
-        if (root == null) {
-            return;
-        }
-
-        programmaticNavigation = true;
-
-        try {
-            for (TreeItem<Object> notebookItem : root.getChildren()) {
-                for (TreeItem<Object> noteItem : notebookItem.getChildren()) {
-                    Object value = noteItem.getValue();
-
-                    if (value instanceof Note note && note.getId() == noteId) {
-                        notebookItem.setExpanded(true);
-                        libraryTree.getSelectionModel().select(noteItem);
-                        libraryTree.scrollTo(libraryTree.getRow(noteItem));
-                        return;
-                    }
-                }
-            }
-        } finally {
-            programmaticNavigation = false;
-        }
-    }
-
-    // =============================================================
-    // LIBRARY TREE
-    // =============================================================
-
-    private void rebuildLibraryTree(
-            TreeView<Object> libraryTree) {
-
-        TreeItem<Object> root =
-                new TreeItem<>("Library");
-
-        for (Notebook notebook : notebookRepository.findAll()) {
-
-            TreeItem<Object> notebookItem =
-                    new TreeItem<>(notebook);
-
-            notebookItem.setExpanded(true);
-
-            for (Note note : noteRepository.findByNotebook(notebook.getId())) {
-                notebookItem.getChildren()
-                        .add(new TreeItem<>(note));
-            }
-
-            root.getChildren()
-                    .add(notebookItem);
-        }
-
-        programmaticNavigation = true;
-
-        try {
-            libraryTree.setRoot(root);
-        } finally {
-            programmaticNavigation = false;
-        }
-    }
-
-    /**
-     * Updates the Note object stored in the visible TreeView without
-     * rebuilding the tree. This preserves expansion and selection while
-     * allowing note titles to change immediately as the user types.
-     */
-    private void updateNoteTitleInTree(
-            TreeView<Object> libraryTree,
-            long noteId,
-            String title) {
-
-        TreeItem<Object> root =
-                libraryTree.getRoot();
-
-        if (root == null) {
-            return;
-        }
-
-        for (TreeItem<Object> notebookItem : root.getChildren()) {
-
-            for (TreeItem<Object> noteItem : notebookItem.getChildren()) {
-
-                Object value =
-                        noteItem.getValue();
-
-                if (value instanceof Note treeNote &&
-                        treeNote.getId() == noteId) {
-
-                    treeNote.setTitle(
-                            cleanTitle(title)
-                    );
-
-                    libraryTree.refresh();
-                    return;
-                }
-            }
-        }
-    }
-
-    private void rebuildSearchTree(
-            TreeView<Object> libraryTree,
-            List<Note> results,
-            String query) {
-
-        TreeItem<Object> root =
-                new TreeItem<>("Search Results");
-
-        for (Notebook notebook : notebookRepository.findAll()) {
-
-            TreeItem<Object> notebookItem =
-                    new TreeItem<>(notebook);
-
-            for (Note note : results) {
-
-                if (note.getNotebookId() == notebook.getId()) {
-                    notebookItem.getChildren()
-                            .add(new TreeItem<>(note));
+                if (book.getId() == targetId) {
+                    chosen = book;
+                    break;
                 }
             }
 
-            if (!notebookItem.getChildren().isEmpty()) {
-                notebookItem.setExpanded(true);
-                root.getChildren().add(notebookItem);
-            }
-        }
-
-        programmaticNavigation = true;
-
-        try {
-            libraryTree.setRoot(root);
-        } finally {
-            programmaticNavigation = false;
-        }
-    }
-
-    // =============================================================
-    // OPEN GLOBAL SEARCH RESULT
-    // =============================================================
-
-    private void openSearchResult(
-            Note searchResult,
-            ListView<Notebook> notebooks,
-            ListView<Note> notes,
-            TextField noteTitle,
-            MarkdownEditor editor,
-            Button deleteNote,
-            Button deleteNotebook,
-            Label status,
-            TextField globalSearch,
-            Label notesTitle) {
-
-        if (searchResult == null) {
-            return;
-        }
-
-        String searchQuery =
-                globalSearch
-                        .getText()
-                        .trim();
-
-        /*
-         * Save the currently open note BEFORE beginning the
-         * controlled navigation.
-         */
-        saveImmediately(
-                noteTitle,
-                editor
-        );
-
-        Notebook targetNotebook =
-                findNotebook(
-                        notebooks,
-                        searchResult.getNotebookId()
-                );
-
-        if (targetNotebook == null) {
-
-            refreshNotebooks(
-                    notebooks
-            );
-
-            targetNotebook =
-                    findNotebook(
-                            notebooks,
-                            searchResult.getNotebookId()
-                    );
-        }
-
-        if (targetNotebook == null) {
-
-            status.setText(
-                    "Unable to locate notebook"
-            );
-
-            return;
-        }
-
-        /*
-         * Load the target notebook's normal note list before
-         * touching the editor.
-         */
-        List<Note> notebookNotes =
-                noteRepository
-                        .findByNotebook(
-                                targetNotebook
-                                        .getId()
-                        );
-
-        Note targetNote =
-                findNote(
-                        notebookNotes,
-                        searchResult.getId()
-                );
-
-        if (targetNote == null) {
-
-            targetNote =
-                    noteRepository
-                            .findById(
-                                    searchResult.getId()
-                            );
-        }
-
-        if (targetNote == null) {
-
-            status.setText(
-                    "Unable to locate note"
-            );
-
-            return;
-        }
-
-        /*
-         * Everything from here to the finally block is one
-         * atomic UI navigation.
-         *
-         * Selection listeners are suppressed, so selecting
-         * the notebook cannot clear the editor.
-         */
-        programmaticNavigation = true;
-
-        searchTimer.stop();
-
-        try {
-
-            notebooks
-                    .getSelectionModel()
-                    .select(
-                            targetNotebook
-                    );
-
-            deleteNotebook.setDisable(
-                    false
-            );
-
-            notes.getSelectionModel()
-                    .clearSelection();
-
-            notes.getItems()
-                    .setAll(
-                            notebookNotes
-                    );
-
-            notes.getSelectionModel()
-                    .select(
-                            targetNote
-                    );
-
-            /*
-             * Load the target directly.
-             *
-             * There is deliberately NO clearEditor() between
-             * the old note and this one.
-             */
-            loadNote(
-                    targetNote,
-                    noteTitle,
-                    editor,
-                    deleteNote,
-                    status
-            );
-
-            /*
-             * Clear the search while listeners are suppressed.
-             * The normal notebook list is already loaded.
-             */
-            suppressSearchRefresh = true;
-
-            try {
-                globalSearch.clear();
-            } finally {
-                suppressSearchRefresh = false;
+            if (chosen == null && !allBooks.isEmpty()) {
+                chosen = allBooks.get(0);
             }
 
-            notesTitle.setText(
-                    "NOTES"
-            );
+            notebookSelector.setValue(chosen);
 
-            int noteMatches =
-                    editor.showSearchMatches(
-                            searchQuery
-                    );
+        } catch (Exception ex) {
 
-            if (noteMatches > 0) {
-                status.setText(
-                        noteMatches +
-                                " match" +
-                                (noteMatches == 1 ? "" : "es") +
-                                " in this note"
-                );
-            } else if (titleContainsSearch(
-                    targetNote.getTitle(),
-                    searchQuery)) {
-
-                selectTitleSearchMatch(
-                        noteTitle,
-                        searchQuery
-                );
-
-                status.setText(
-                        "Match found in note title"
-                );
-            } else {
-                status.setText(
-                        "Loaded"
-                );
-            }
+            error("Unable to load notebooks", ex);
 
         } finally {
 
-            programmaticNavigation =
-                    false;
+            navigating = false;
         }
-    }
 
-    // =============================================================
-    // SEARCH MATCH COUNTING
-    // =============================================================
+        Notebook selected = selectedBook();
 
-    private int countSearchMatches(
-            List<Note> notes,
-            String query) {
+        if (selected == null) {
 
-        int count = 0;
+            noteList.getItems().clear();
+            current = null;
+            clearEditor();
 
-        for (Note note : notes) {
-            count += countSearchMatchesInText(
-                    note.getTitle(),
-                    query
+        } else {
+
+            preferences.putLong(
+                    LAST_NOTEBOOK,
+                    selected.getId()
             );
 
-            count += countSearchMatchesInText(
-                    note.getBody(),
-                    query
-            );
+            loadNotebook(selected);
         }
-
-        return count;
     }
 
-    private int countSearchMatchesInText(
-            String text,
-            String query) {
+    private void selectNotebook(long notebookId) {
 
-        if (text == null ||
-                text.isBlank() ||
-                query == null ||
-                query.isBlank()) {
-            return 0;
-        }
+        for (Notebook book : notebookSelector.getItems()) {
 
-        String cleaned =
-                query.trim()
-                        .replaceAll(
-                                "[^\\p{L}\\p{N}_]+",
-                                " "
-                        );
+            if (book.getId() == notebookId) {
 
-        if (cleaned.isBlank()) {
-            return 0;
-        }
-
-        int count = 0;
-        Set<String> uniqueRanges =
-                new LinkedHashSet<>();
-
-        for (String term : cleaned.split("\\s+")) {
-
-            if (term.isBlank()) {
-                continue;
-            }
-
-            Pattern pattern =
-                    Pattern.compile(
-                            "(?iu)(?<![\\p{L}\\p{N}_])" +
-                                    Pattern.quote(term) +
-                                    "[\\p{L}\\p{N}_]*"
-                    );
-
-            Matcher matcher =
-                    pattern.matcher(text);
-
-            while (matcher.find()) {
-
-                String range =
-                        matcher.start() +
-                                ":" +
-                                matcher.end();
-
-                if (uniqueRanges.add(range)) {
-                    count++;
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private boolean titleContainsSearch(
-            String title,
-            String query) {
-
-        return countSearchMatchesInText(
-                title,
-                query
-        ) > 0;
-    }
-
-    private void selectTitleSearchMatch(
-            TextField noteTitle,
-            String query) {
-
-        String title =
-                noteTitle.getText();
-
-        if (title == null ||
-                query == null) {
-            return;
-        }
-
-        String cleaned =
-                query.trim()
-                        .replaceAll(
-                                "[^\\p{L}\\p{N}_]+",
-                                " "
-                        );
-
-        for (String term : cleaned.split("\\s+")) {
-
-            if (term.isBlank()) {
-                continue;
-            }
-
-            Pattern pattern =
-                    Pattern.compile(
-                            "(?iu)(?<![\\p{L}\\p{N}_])" +
-                                    Pattern.quote(term) +
-                                    "[\\p{L}\\p{N}_]*"
-                    );
-
-            Matcher matcher =
-                    pattern.matcher(title);
-
-            if (matcher.find()) {
-                noteTitle.requestFocus();
-                noteTitle.selectRange(
-                        matcher.start(),
-                        matcher.end()
-                );
+                notebookSelector.setValue(book);
                 return;
             }
         }
     }
 
-    // =============================================================
-    // FIND NOTEBOOK
-    // =============================================================
+    private void createNotebook() {
 
-    private Notebook findNotebook(
-            ListView<Notebook> notebooks,
-            long notebookId) {
+        TextInputDialog dialog = new TextInputDialog();
 
-        for (Notebook notebook :
-                notebooks.getItems()) {
+        configureDialog(
+                dialog,
+                "New Notebook",
+                420,
+                200
+        );
 
-            if (notebook.getId() ==
-                    notebookId) {
+        dialog.setHeaderText(null);
+        dialog.setContentText("Notebook name:");
 
-                return notebook;
-            }
-        }
+        dialog.showAndWait()
+                .map(String::strip)
+                .filter(name -> !name.isBlank())
+                .ifPresent(name -> {
 
-        return null;
+                    try {
+
+                        flushSave();
+
+                        Notebook created = books.create(name);
+
+                        reloadNotebooks(created.getId());
+
+                    } catch (Exception ex) {
+
+                        error(
+                                "Unable to create notebook",
+                                ex
+                        );
+                    }
+                });
     }
 
-    // =============================================================
-    // FIND NOTE
-    // =============================================================
+    private void deleteNotebook() {
 
-    private Note findNote(
-            List<Note> notes,
-            long noteId) {
+        Notebook book = selectedBook();
 
-        for (Note note : notes) {
+        if (book == null) {
 
-            if (note.getId() ==
-                    noteId) {
+            info(
+                    "Delete Notebook",
+                    "Select a notebook first."
+            );
 
+            return;
+        }
+
+        flushSave();
+
+        Alert confirmation = new Alert(
+                Alert.AlertType.CONFIRMATION
+        );
+
+        configureDialog(
+                confirmation,
+                "Delete Notebook",
+                470,
+                245
+        );
+
+        confirmation.setHeaderText(
+                "Delete notebook \"" + book.getName() + "\"?"
+        );
+
+        confirmation.setContentText(
+                "This permanently deletes the notebook "
+                        + "and all notes inside it.\n\n"
+                        + "This action cannot be undone."
+        );
+
+        ButtonType deleteButton = new ButtonType(
+                "Delete Notebook",
+                ButtonBar.ButtonData.OK_DONE
+        );
+
+        confirmation.getButtonTypes().setAll(
+                deleteButton,
+                ButtonType.CANCEL
+        );
+
+        if (confirmation.showAndWait()
+                .orElse(ButtonType.CANCEL) != deleteButton) {
+            return;
+        }
+
+        try {
+
+            books.delete(book);
+
+            current = null;
+            clearEditor();
+
+            preferences.remove(LAST_NOTEBOOK);
+
+            reloadNotebooks(null);
+            refreshSearch();
+
+            status.setText("Notebook deleted");
+
+        } catch (Exception ex) {
+
+            error("Unable to delete notebook", ex);
+        }
+    }
+
+    private void loadNotebook(Notebook book) {
+
+        if (book == null) {
+            return;
+        }
+
+        flushSave();
+
+        navigating = true;
+
+        try {
+
+            noteList.setItems(
+                    FXCollections.observableArrayList(
+                            notes.findByNotebook(book.getId())
+                    )
+            );
+
+            if (current != null
+                    && current.getNotebookId() != book.getId()) {
+
+                current = null;
+                clearEditor();
+            }
+
+        } catch (Exception ex) {
+
+            error("Unable to load notebook", ex);
+
+        } finally {
+
+            navigating = false;
+        }
+    }
+
+    private Note findListedNote(long noteId) {
+
+        for (Note note : noteList.getItems()) {
+
+            if (note.getId() == noteId) {
                 return note;
             }
         }
@@ -2841,309 +787,913 @@ public class ZorzaNotes extends Application {
         return null;
     }
 
-    // =============================================================
-    // RESTORE NORMAL NOTEBOOK VIEW
-    // =============================================================
+    private void createNote() {
 
-    private void restoreSelectedNotebookNotes(
-            ListView<Notebook> notebooks,
-            ListView<Note> notes,
-            Label notesTitle) {
+        Notebook book = selectedBook();
 
-        Notebook selectedNotebook =
-                notebooks
-                        .getSelectionModel()
-                        .getSelectedItem();
+        if (book == null) {
 
-        notesTitle.setText(
-                "NOTES"
+            info(
+                    "New Note",
+                    "Create or select a notebook first."
+            );
+
+            return;
+        }
+
+        flushSave();
+
+        try {
+
+            Note created = notes.create(book.getId());
+
+            loadNotebook(book);
+
+            Note listed = findListedNote(created.getId());
+
+            if (listed == null) {
+
+                listed = created;
+                noteList.getItems().add(listed);
+            }
+
+            noteList.getSelectionModel().select(listed);
+            openNote(listed);
+
+            title.requestFocus();
+            title.selectAll();
+
+        } catch (Exception ex) {
+
+            error("Unable to create note", ex);
+        }
+    }
+
+    private void openNote(Note note) {
+
+        if (note == null) {
+            return;
+        }
+
+        if (current != null
+                && current.getId() == note.getId()) {
+            return;
+        }
+
+        flushSave();
+
+        loading = true;
+
+        try {
+
+            current = note;
+
+            title.setDisable(false);
+
+            title.setText(
+                    note.getTitle() == null
+                            ? ""
+                            : note.getTitle()
+            );
+
+            editor.area().replaceText(
+                    note.getBody() == null
+                            ? ""
+                            : note.getBody()
+            );
+
+            status.setText("Editing encrypted note");
+
+        } finally {
+
+            loading = false;
+        }
+    }
+
+    private void openResult(Note note) {
+
+        if (note == null) {
+            return;
+        }
+
+        flushSave();
+
+        selectNotebook(note.getNotebookId());
+
+        Note listed = findListedNote(note.getId());
+
+        if (listed != null) {
+
+            noteList.getSelectionModel().select(listed);
+            openNote(listed);
+
+        } else {
+
+            openNote(note);
+        }
+
+        editor.showMatch(search.getText());
+    }
+
+    private void clearEditor() {
+
+        loading = true;
+
+        try {
+
+            title.clear();
+            title.setDisable(true);
+
+            editor.area().clear();
+
+            status.setText("Ready");
+
+        } finally {
+
+            loading = false;
+        }
+    }
+
+    private void markDirty() {
+
+        if (loading || current == null) {
+            return;
+        }
+
+        editRevision++;
+
+        status.setText("Saving...");
+
+        Note listed = findListedNote(current.getId());
+
+        if (listed != null) {
+
+            listed.setTitle(
+                    title.getText().isBlank()
+                            ? "Untitled Note"
+                            : title.getText()
+            );
+
+            noteList.refresh();
+        }
+
+        saveDelay.playFromStart();
+    }
+
+    private void save() {
+
+        saveDelay.stop();
+
+        if (loading || current == null) {
+            return;
+        }
+
+        long noteId = current.getId();
+
+        if (queuedRevision == editRevision
+                && queuedNoteId == noteId) {
+            return;
+        }
+
+        String noteTitle =
+                title.getText().isBlank()
+                        ? "Untitled Note"
+                        : title.getText();
+
+        Note snapshot = new Note(
+                current.getId(),
+                current.getUuid(),
+                current.getNotebookId(),
+                noteTitle,
+                editor.area().getText()
         );
 
-        if (selectedNotebook == null) {
+        long revision = editRevision;
 
-            programmaticNavigation = true;
+        queuedRevision = revision;
+        queuedNoteId = noteId;
+
+        pendingSave = io.submit(() -> {
 
             try {
 
-                notes.getSelectionModel()
-                        .clearSelection();
+                notes.update(snapshot);
 
-                notes.getItems()
-                        .clear();
+                Platform.runLater(() -> {
 
-            } finally {
+                    if (current != null
+                            && current.getId() == snapshot.getId()
+                            && revision == editRevision) {
 
-                programmaticNavigation =
-                        false;
+                        Note listed = findListedNote(
+                                snapshot.getId()
+                        );
+
+                        if (listed != null) {
+
+                            listed.setTitle(snapshot.getTitle());
+                            listed.setBody(snapshot.getBody());
+
+                            noteList.refresh();
+                        }
+
+                        status.setText(
+                                "Saved locally • encrypted"
+                        );
+                    }
+                });
+
+            } catch (Exception ex) {
+
+                Platform.runLater(() -> {
+
+                    if (queuedRevision == revision
+                            && queuedNoteId == noteId) {
+
+                        queuedRevision = -1;
+                        queuedNoteId = -1;
+                    }
+
+                    status.setText("Save failed");
+                    error("Save failed", ex);
+                });
             }
+        });
+    }
 
+    private void flushSave() {
+
+        save();
+
+        Future<?> task = pendingSave;
+
+        if (task == null) {
             return;
         }
 
-        List<Note> notebookNotes =
-                noteRepository
-                        .findByNotebook(
-                                selectedNotebook
-                                        .getId()
-                        );
-
-        programmaticNavigation = true;
-
         try {
 
-            notes.getSelectionModel()
-                    .clearSelection();
+            task.get();
 
-            notes.getItems()
-                    .setAll(
-                            notebookNotes
-                    );
+        } catch (InterruptedException ex) {
 
-            /*
-             * If the current note belongs to this notebook,
-             * keep it selected when search is merely cleared.
-             */
-            if (currentNote != null &&
-                    currentNote.getNotebookId() ==
-                            selectedNotebook.getId()) {
+            Thread.currentThread().interrupt();
+            error("Save interrupted", ex);
 
-                Note matchingNote =
-                        findNote(
-                                notebookNotes,
-                                currentNote.getId()
-                        );
+        } catch (ExecutionException ex) {
 
-                if (matchingNote != null) {
-
-                    notes.getSelectionModel()
-                            .select(
-                                    matchingNote
-                            );
-                }
-            }
-
-        } finally {
-
-            programmaticNavigation =
-                    false;
+            error(
+                    "Save failed",
+                    new RuntimeException(ex.getCause())
+            );
         }
     }
 
-    // =============================================================
-    // LOAD NOTE
-    // =============================================================
+    private ListCell<Note> noteCell() {
 
-    private void loadNote(
-            Note note,
-            TextField noteTitle,
-            MarkdownEditor editor,
-            Button deleteNote,
-            Label status) {
+        ListCell<Note> cell = new ListCell<>() {
 
-        loadingNote =
-                true;
+            @Override
+            protected void updateItem(
+                    Note note,
+                    boolean empty) {
 
-        try {
+                super.updateItem(note, empty);
 
-            editor.clearSearchMatches();
+                setText(
+                        empty || note == null
+                                ? null
+                                : note.toString()
+                );
+            }
+        };
 
-            currentNote =
-                    note;
+        MenuItem open = new MenuItem("Open");
+        Menu move = new Menu("Move to Notebook");
+        MenuItem delete = new MenuItem("Delete Note");
+
+        open.setOnAction(e -> {
+
+            if (cell.getItem() != null) {
+                openNote(cell.getItem());
+            }
+        });
+
+        delete.setOnAction(e -> {
+
+            if (cell.getItem() != null) {
+                deleteNote(cell.getItem());
+            }
+        });
+
+        ContextMenu context = new ContextMenu(
+                open,
+                move,
+                new SeparatorMenuItem(),
+                delete
+        );
+
+        context.setOnShowing(e -> {
+
+            move.getItems().clear();
+
+            Note note = cell.getItem();
 
             if (note == null) {
-
-                noteTitle.clear();
-
-                editor.clear();
-
-                noteTitle.setDisable(
-                        true
-                );
-
-                editor.setEditorDisabled(
-                        true
-                );
-
-                deleteNote.setDisable(
-                        true
-                );
-
-                status.setText(
-                        "Select a note"
-                );
-
                 return;
             }
 
-            noteTitle.setDisable(
-                    false
-            );
+            for (Notebook book : books.findAll()) {
 
-            editor.setEditorDisabled(
-                    false
-            );
+                if (book.getId() == note.getNotebookId()) {
+                    continue;
+                }
 
-            deleteNote.setDisable(
-                    false
-            );
+                MenuItem item = new MenuItem(book.getName());
 
-            noteTitle.setText(
-                    note.getTitle()
-            );
-
-            editor.setText(
-                    note.getBody()
-            );
-
-            status.setText(
-                    "Loaded"
-            );
-
-        } finally {
-
-            loadingNote =
-                    false;
-        }
-    }
-
-    // =============================================================
-    // CLEAR EDITOR
-    // =============================================================
-
-    private void clearEditor(
-            TextField noteTitle,
-            MarkdownEditor editor) {
-
-        loadingNote =
-                true;
-
-        try {
-
-            currentNote =
-                    null;
-
-            noteTitle.clear();
-
-            editor.clear();
-
-            noteTitle.setDisable(
-                    true
-            );
-
-            editor.setEditorDisabled(
-                    true
-            );
-
-        } finally {
-
-            loadingNote =
-                    false;
-        }
-    }
-
-    // =============================================================
-    // REFRESH NOTEBOOKS
-    // =============================================================
-
-    private void refreshNotebooks(
-            ListView<Notebook> notebooks) {
-
-        notebooks.getItems()
-                .setAll(
-                        notebookRepository
-                                .findAll()
+                item.setOnAction(event ->
+                        moveNote(note, book)
                 );
+
+                move.getItems().add(item);
+            }
+
+            move.setDisable(move.getItems().isEmpty());
+        });
+
+        cell.itemProperty()
+                .addListener((obs, oldNote, note) ->
+                        cell.setContextMenu(
+                                note == null
+                                        ? null
+                                        : context
+                        )
+                );
+
+        return cell;
     }
 
-    // =============================================================
-    // SAVE IMMEDIATELY
-    // =============================================================
+    private void deleteNote(Note note) {
 
-    private void saveImmediately(
-            TextField title,
-            MarkdownEditor editor) {
+        Alert confirmation = new Alert(
+                Alert.AlertType.CONFIRMATION
+        );
 
-        autoSaveTimer.stop();
+        configureDialog(
+                confirmation,
+                "Delete Note",
+                430,
+                210
+        );
 
-        if (currentNote == null ||
-                loadingNote) {
+        confirmation.setHeaderText("Delete this note?");
+        confirmation.setContentText(note.toString());
 
+        confirmation.getButtonTypes().setAll(
+                ButtonType.YES,
+                ButtonType.NO
+        );
+
+        if (confirmation.showAndWait()
+                .orElse(ButtonType.NO) != ButtonType.YES) {
             return;
         }
 
-        currentNote.setTitle(
-                cleanTitle(
-                        title.getText()
+        flushSave();
+
+        try {
+
+            notes.delete(note);
+
+            if (current != null
+                    && current.getId() == note.getId()) {
+
+                current = null;
+                clearEditor();
+            }
+
+            loadNotebook(selectedBook());
+            refreshSearch();
+
+        } catch (Exception ex) {
+
+            error("Unable to delete note", ex);
+        }
+    }
+
+    private void moveNote(
+            Note note,
+            Notebook destination) {
+
+        flushSave();
+
+        try {
+
+            notes.moveToNotebook(
+                    note.getId(),
+                    destination.getId()
+            );
+
+            if (current != null
+                    && current.getId() == note.getId()) {
+
+                current = null;
+                clearEditor();
+            }
+
+            loadNotebook(selectedBook());
+            refreshSearch();
+
+        } catch (Exception ex) {
+
+            error("Unable to move note", ex);
+        }
+    }
+
+    private void refreshSearch() {
+
+        runSearch(
+                search.getText(),
+                ++searchRevision
+        );
+    }
+
+    private void runSearch(
+            String query,
+            long revision) {
+
+        if (query == null || query.isBlank()) {
+
+            results.getItems().clear();
+            return;
+        }
+
+        io.submit(() -> {
+
+            try {
+
+                List<Note> found = notes.searchAll(query);
+
+                Platform.runLater(() -> {
+
+                    if (revision == searchRevision) {
+
+                        results.setItems(
+                                FXCollections.observableArrayList(
+                                        found
+                                )
+                        );
+                    }
+                });
+
+            } catch (Exception ex) {
+
+                Platform.runLater(() ->
+                        error("Search failed", ex)
+                );
+            }
+        });
+    }
+
+    private void exportNotes() {
+
+        flushSave();
+
+        DirectoryChooser chooser = new DirectoryChooser();
+
+        chooser.setTitle("Export All Zorza Notes");
+
+        File destination = chooser.showDialog(mainStage);
+
+        if (destination == null) {
+            return;
+        }
+
+        try {
+
+            int count = importExport.exportAll(
+                    destination.toPath()
+            );
+
+            info(
+                    "Export Complete",
+                    count + " notes exported as Markdown.\n\n"
+                            + destination.getAbsolutePath()
+                            + "\n\nExported files are not encrypted."
+            );
+
+        } catch (Exception ex) {
+
+            error("Export failed", ex);
+        }
+    }
+
+    private void importNotes() {
+
+        flushSave();
+
+        DirectoryChooser chooser = new DirectoryChooser();
+
+        chooser.setTitle("Import Markdown Notes");
+
+        File selected = chooser.showDialog(mainStage);
+
+        if (selected == null) {
+            return;
+        }
+
+        try {
+
+            Path directory = selected.toPath();
+            int imported = 0;
+
+            List<Path> subdirectories;
+
+            try (var stream = Files.list(directory)) {
+
+                subdirectories = stream
+                        .filter(Files::isDirectory)
+                        .sorted()
+                        .toList();
+            }
+
+            if (containsMarkdown(directory)) {
+
+                imported += importExport.importDirectory(
+                        directory
+                );
+            }
+
+            for (Path child : subdirectories) {
+
+                if (containsMarkdown(child)) {
+
+                    imported += importExport.importDirectory(
+                            child
+                    );
+                }
+            }
+
+            reloadNotebooks(null);
+            refreshSearch();
+
+            info(
+                    "Import Complete",
+                    imported + " Markdown notes imported."
+            );
+
+        } catch (Exception ex) {
+
+            error("Import failed", ex);
+        }
+    }
+
+    private boolean containsMarkdown(Path directory)
+            throws java.io.IOException {
+
+        try (var stream = Files.list(directory)) {
+
+            return stream.anyMatch(path ->
+                    Files.isRegularFile(path)
+                            && path.getFileName()
+                            .toString()
+                            .toLowerCase(Locale.ROOT)
+                            .endsWith(".md")
+            );
+        }
+    }
+
+    private void showSettings() {
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+
+        configureDialog(
+                dialog,
+                "Fonts and Appearance",
+                500,
+                360
+        );
+
+        ComboBox<String> noteFont = new ComboBox<>();
+        ComboBox<String> appFont = new ComboBox<>();
+
+        noteFont.getItems().setAll(Font.getFamilies());
+        appFont.getItems().setAll(Font.getFamilies());
+
+        noteFont.setValue(AppSettings.getNoteFont());
+        appFont.setValue(AppSettings.getAppFont());
+
+        Spinner<Integer> noteSize = new Spinner<>(
+                10,
+                48,
+                Math.max(
+                        10,
+                        Math.min(
+                                48,
+                                AppSettings.getNoteFontSize()
+                        )
                 )
         );
 
-        currentNote.setBody(
-                editor.getText()
+        Spinner<Integer> appSize = new Spinner<>(
+                10,
+                28,
+                Math.max(
+                        10,
+                        Math.min(
+                                28,
+                                AppSettings.getAppFontSize()
+                        )
+                )
         );
 
-        noteRepository.update(
-                currentNote
-        );
-    }
+        noteSize.setEditable(true);
+        appSize.setEditable(true);
 
-    // =============================================================
-    // CLEAN TITLE
-    // =============================================================
+        noteFont.setMaxWidth(Double.MAX_VALUE);
+        appFont.setMaxWidth(Double.MAX_VALUE);
 
-    private String cleanTitle(
-            String title) {
+        GridPane grid = new GridPane();
 
-        if (title == null ||
-                title.trim().isEmpty()) {
+        grid.setHgap(14);
+        grid.setVgap(16);
+        grid.setPadding(new Insets(16));
 
-            return "Untitled Note";
-        }
+        grid.add(new Label("Note editor font"), 0, 0);
+        grid.add(noteFont, 1, 0);
 
-        return title.trim();
-    }
+        grid.add(new Label("Note editor size"), 0, 1);
+        grid.add(noteSize, 1, 1);
 
-    // =============================================================
-    // ERROR DIALOG
-    // =============================================================
+        grid.add(new Label("Application font"), 0, 2);
+        grid.add(appFont, 1, 2);
 
-    private void showError(
-            Stage owner,
-            String title,
-            Exception exception) {
+        grid.add(new Label("Application size"), 0, 3);
+        grid.add(appSize, 1, 3);
 
-        Alert alert =
-                new Alert(
-                        Alert.AlertType.ERROR
+        GridPane.setHgrow(noteFont, Priority.ALWAYS);
+        GridPane.setHgrow(appFont, Priority.ALWAYS);
+
+        dialog.getDialogPane().setContent(grid);
+
+        dialog.getDialogPane()
+                .getButtonTypes()
+                .addAll(
+                        ButtonType.OK,
+                        ButtonType.CANCEL
                 );
 
-        alert.initOwner(
-                owner
-        );
+        dialog.showAndWait().ifPresent(button -> {
 
-        alert.setTitle(
-                title
-        );
+            if (button != ButtonType.OK) {
+                return;
+            }
 
-        alert.setHeaderText(
-                title
-        );
+            try {
 
-        alert.setContentText(
-                exception.getMessage() == null
-                        ? exception.toString()
-                        : exception.getMessage()
-        );
+                noteSize.getValueFactory().setValue(
+                        Integer.parseInt(
+                                noteSize.getEditor().getText()
+                        )
+                );
 
-        alert.showAndWait();
+                appSize.getValueFactory().setValue(
+                        Integer.parseInt(
+                                appSize.getEditor().getText()
+                        )
+                );
+
+                AppSettings.setNoteFont(
+                        noteFont.getValue()
+                );
+
+                AppSettings.setNoteFontSize(
+                        noteSize.getValue()
+                );
+
+                AppSettings.setAppFont(
+                        appFont.getValue()
+                );
+
+                AppSettings.setAppFontSize(
+                        appSize.getValue()
+                );
+
+                applyFontSettings();
+
+                status.setText(
+                        "Appearance settings saved"
+                );
+
+            } catch (Exception ex) {
+
+                error(
+                        "Unable to save settings",
+                        ex
+                );
+            }
+        });
     }
 
-    // =============================================================
-    // MAIN
-    // =============================================================
+    private void applyFontSettings() {
 
-    public static void main(
-            String[] args) {
+        if (mainStage != null
+                && mainStage.getScene() != null) {
 
+            Scene scene = mainStage.getScene();
+
+            ThemeManager.apply(scene);
+
+            scene.getRoot()
+                    .getStyleClass()
+                    .remove("zorza-dark");
+
+            if (AppSettings.isDarkMode()) {
+
+                scene.getRoot()
+                        .getStyleClass()
+                        .add("zorza-dark");
+            }
+        }
+
+        if (editor != null) {
+
+            editor.setEditorFont(
+                    AppSettings.getNoteFont(),
+                    AppSettings.getNoteFontSize()
+            );
+        }
+    }
+
+    private MenuBar buildMenu(
+            Button addNotebook,
+            Button deleteNotebook,
+            Button addNote) {
+
+        Menu file = new Menu("File");
+
+        MenuItem newNotebook =
+                new MenuItem("New Notebook");
+
+        MenuItem newNote =
+                new MenuItem("New Note");
+
+        MenuItem importItem =
+                new MenuItem("Import Markdown Folder...");
+
+        MenuItem exportItem =
+                new MenuItem("Export All Notes...");
+
+        MenuItem exit =
+                new MenuItem("Exit");
+
+        newNotebook.setOnAction(e ->
+                addNotebook.fire()
+        );
+
+        newNote.setOnAction(e ->
+                addNote.fire()
+        );
+
+        importItem.setOnAction(e ->
+                importNotes()
+        );
+
+        exportItem.setOnAction(e ->
+                exportNotes()
+        );
+
+        exit.setOnAction(e ->
+                mainStage.close()
+        );
+
+        file.getItems().addAll(
+                newNotebook,
+                newNote,
+                new SeparatorMenuItem(),
+                importItem,
+                exportItem,
+                new SeparatorMenuItem(),
+                exit
+        );
+
+        Menu edit = new Menu("Edit");
+
+        MenuItem undo = new MenuItem("Undo");
+        MenuItem redo = new MenuItem("Redo");
+
+        MenuItem deleteNoteItem =
+                new MenuItem("Delete Note");
+
+        MenuItem deleteNotebookItem =
+                new MenuItem("Delete Notebook");
+
+        undo.setOnAction(e ->
+                editor.area().undo()
+        );
+
+        redo.setOnAction(e ->
+                editor.area().redo()
+        );
+
+        deleteNoteItem.setOnAction(e -> {
+
+            if (current != null) {
+                deleteNote(current);
+            }
+        });
+
+        deleteNotebookItem.setOnAction(e ->
+                deleteNotebook.fire()
+        );
+
+        edit.getItems().addAll(
+                undo,
+                redo,
+                new SeparatorMenuItem(),
+                deleteNoteItem,
+                deleteNotebookItem
+        );
+
+        Menu view = new Menu("View");
+
+        CheckMenuItem darkMode =
+                new CheckMenuItem("Dark Mode");
+
+        darkMode.setSelected(
+                AppSettings.isDarkMode()
+        );
+
+        darkMode.setOnAction(e -> {
+
+            AppSettings.setDarkMode(
+                    darkMode.isSelected()
+            );
+
+            applyFontSettings();
+        });
+
+        view.getItems().add(darkMode);
+
+        Menu settings = new Menu("Settings");
+
+        MenuItem appearance =
+                new MenuItem("Fonts and Appearance...");
+
+        appearance.setOnAction(e ->
+                showSettings()
+        );
+
+        settings.getItems().add(appearance);
+
+        Menu help = new Menu("Help");
+
+        MenuItem about =
+                new MenuItem("About Zorza Notes");
+
+        about.setOnAction(e ->
+                showAbout()
+        );
+
+        help.getItems().add(about);
+
+        return new MenuBar(
+                file,
+                edit,
+                view,
+                settings,
+                help
+        );
+    }
+
+    @Override
+    public void stop() {
+
+        io.shutdown();
+
+        try {
+
+            if (!io.awaitTermination(
+                    10,
+                    TimeUnit.SECONDS
+            )) {
+
+                System.err.println(
+                        "Pending database operations at shutdown"
+                );
+            }
+
+        } catch (InterruptedException ex) {
+
+            Thread.currentThread().interrupt();
+
+        } finally {
+
+            VaultService.clearPassword();
+        }
+    }
+
+    public static void main(String[] args) {
         launch(args);
     }
 }

@@ -1,56 +1,44 @@
+
 package org.zorzanotes;
 
 import javafx.scene.Scene;
+import javafx.scene.Parent;
 
-public class ThemeManager {
+public final class ThemeManager {
+
+    private ThemeManager() {}
 
     public static void apply(Scene scene) {
-
         scene.getStylesheets().clear();
 
-        String stylesheet;
+        String stylesheet = AppSettings.isDarkMode()
+                ? "/zorza-dark.css"
+                : "/zorza-light.css";
 
-        if (AppSettings.isDarkMode()) {
-            stylesheet = "/zorza-dark.css";
-        } else {
-            stylesheet = "/zorza-light.css";
+        var resource =
+                ThemeManager.class.getResource(stylesheet);
+
+        if (resource == null) {
+            throw new IllegalStateException(
+                    "Missing stylesheet: " + stylesheet);
         }
 
         scene.getStylesheets().add(
-                ThemeManager.class
-                        .getResource(stylesheet)
-                        .toExternalForm()
-        );
+                resource.toExternalForm());
 
-        applyTextSize(scene);
+        applyApplicationFont(scene.getRoot());
     }
 
-    private static void applyTextSize(Scene scene) {
+    public static void applyApplicationFont(Parent root) {
+        String family = AppSettings.getAppFont()
+                .replace("\\", "\\\\")
+                .replace("'", "\\'");
 
-        scene.getRoot()
-                .getStyleClass()
-                .removeAll(
-                        "text-normal",
-                        "text-large",
-                        "text-extra-large"
-                );
+        int size = Math.max(10,
+                Math.min(28, AppSettings.getAppFontSize()));
 
-        switch (AppSettings.getTextSize()) {
-
-            case NORMAL ->
-                    scene.getRoot()
-                            .getStyleClass()
-                            .add("text-normal");
-
-            case LARGE ->
-                    scene.getRoot()
-                            .getStyleClass()
-                            .add("text-large");
-
-            case EXTRA_LARGE ->
-                    scene.getRoot()
-                            .getStyleClass()
-                            .add("text-extra-large");
-        }
+        root.setStyle(
+                "-fx-font-family: '" + family + "';" +
+                        "-fx-font-size: " + size + "px;");
     }
 }
